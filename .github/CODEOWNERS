@@ -1,0 +1,21 @@
+# Code owners for accelo-mcp
+#
+# Owners listed here are automatically requested for review when a pull request
+# touches a matching path. The last matching pattern takes precedence, so more
+# specific rules are placed after the catch-all.
+#
+# Owners must have write access to the repository (and, for a team, be a
+# collaborator on it) or GitHub will not assign the review.
+
+# Default owner for everything in the repository
+*                               @Selerity/maintainers
+
+# Security-sensitive: OAuth flows and the API request layer
+/src/accelo_mcp/auth.py         @Selerity/maintainers
+/src/accelo_mcp/client.py       @Selerity/maintainers
+/src/accelo_mcp/config.py       @Selerity/maintainers
+
+# CI/CD, release, and dependency configuration
+/.github/                       @Selerity/maintainers
+/pyproject.toml                 @Selerity/maintainers
+/Makefile                       @Selerity/maintainers

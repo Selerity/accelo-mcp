@@ -1,0 +1,78 @@
+{
+  "list_companies": {
+    "meta": {
+      "status": "ok",
+      "message": "Everything executed as expected.",
+      "more_info": "https://api.accelo.com/docs/#status-codes"
+    },
+    "response": [
+      {
+        "id": "1",
+        "name": "Planet Express",
+        "standing": "active"
+      },
+      {
+        "id": "2",
+        "name": "Mom's Friendly Robot Company",
+        "standing": "active"
+      }
+    ]
+  },
+  "get_company": {
+    "meta": {
+      "status": "ok",
+      "message": "Everything executed as expected."
+    },
+    "response": {
+      "id": "1",
+      "name": "Planet Express",
+      "standing": "active",
+      "website": "www.planetexpress.com",
+      "phone": "555-0123",
+      "date_created": "1495669367",
+      "date_modified": "1495671183"
+    }
+  },
+  "count_companies": {
+    "meta": {
+      "status": "ok",
+      "message": "Everything executed as expected."
+    },
+    "response": {
+      "count": "42"
+    }
+  },
+  "create_company": {
+    "meta": {
+      "status": "ok",
+      "message": "Everything executed as expected."
+    },
+    "response": {
+      "id": "45",
+      "name": "A Fresh New Company",
+      "standing": "active",
+      "date_created": "1495669367"
+    }
+  },
+  "error_invalid_request": {
+    "meta": {
+      "status": "invalid_request",
+      "message": "The request is missing a required parameter.",
+      "more_info": "https://api.accelo.com/docs/#status-codes"
+    }
+  },
+  "error_rate_limited": {
+    "meta": {
+      "status": "too_many_requests",
+      "message": "Rate limit exceeded for test.api.accelo.com",
+      "more_info": "https://api.accelo.com/docs/#rate-limiting"
+    }
+  },
+  "token_response": {
+    "access_token": "Ck9ma73_db",
+    "expires_in": "2592000",
+    "token_type": "Bearer",
+    "deployment": "test",
+    "deployment_name": "Test Deployment"
+  }
+}

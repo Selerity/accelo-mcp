@@ -1,0 +1,53 @@
+name: Feature request
+description: Suggest a new capability or improvement for accelo-mcp
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Please keep credentials and real Accelo
+        data out of this request.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what makes it hard today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: Describe the tool, argument, or behaviour you would like to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you have tried or thought about.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: permissions-impact
+    attributes:
+      label: Permissions impact
+      description: Does this request involve write access or a change to OAuth scopes?
+      options:
+        - "No — read-only"
+        - "Yes — requires write access or a broader OAuth scope"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links to relevant Accelo API documentation, if any.
+    validations:
+      required: false

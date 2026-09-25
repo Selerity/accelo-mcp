@@ -143,7 +143,7 @@ PyPI publish are automated by a single workflow.
 
 1. Bump `version` in `pyproject.toml` (for example `0.1.0` to `0.2.0`) on a branch
    and merge it to `main` through a pull request. Follow semantic versioning.
-2. On merge, the **Release** workflow (`.github/workflows/release.yml`) detects the
+2. On merge, the **Release** workflow (`.github/workflows/publish.yml`) detects the
    changed version and, in one run:
    - runs `make check` (lint, tests, and dependency audit),
    - creates the matching `v<version>` tag and a GitHub Release with generated
@@ -172,7 +172,10 @@ still verifies the tag equals `v` + the `pyproject.toml` version and fails if th
 differ, so the tag and the package version cannot drift.
 
 Publishing to PyPI requires a configured `pypi` GitHub environment and a PyPI
-Trusted Publisher registered for this repository's `release.yml` workflow.
+Trusted Publisher registered for this repository's `publish.yml` workflow. The
+workflow file must stay named `publish.yml`: PyPI matches the trusted publisher on
+the exact workflow filename, so renaming it breaks publishing even though the
+workflow's display name is "Release".
 
 ## Security
 

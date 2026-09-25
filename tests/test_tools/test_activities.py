@@ -359,3 +359,139 @@ class TestListActivitiesSearchGuard:
         await client.close()
 
         assert "_search" not in str(route.calls[0].request.url)
+
+
+class TestCreateActivity:
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_minimal(self, server_and_client):
+        server, client = server_and_client
+
+        route = respx.post(f"{BASE}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "2001"}},
+            )
+        )
+
+        result = parse_result(
+            await server.call_tool(
+                "accelo_create_activity",
+                {"subject": "Kickoff note", "against_type": "company", "against_id": 39},
+            )
+        )
+        await client.close()
+
+        assert result["response"]["id"] == "2001"
+        body = route.calls[0].request.content.decode()
+        assert "subject=Kickoff" in body
+        assert "against_type=company" in body
+        assert "against_id=39" in body
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_logs_time_against_task(self, server_and_client):
+        """Time logging against a task: parent as against, task id + visibility=all."""
+        server, client = server_and_client
+
+        route = respx.post(f"{BASE}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "2002"}},
+            )
+        )
+
+        await server.call_tool(
+            "accelo_create_activity",
+            {
+                "subject": "Worked on SEO audit",
+                "against_type": "milestone",
+                "against_id": 15,
+                "task": 24,
+                "visibility": "all",
+                "date_started": 1690000000,
+                "billable": 3600,
+            },
+        )
+        await client.close()
+
+        body = route.calls[0].request.content.decode()
+        # The create endpoint expects task_id, not task.
+        assert "task_id=24" in body
+        assert "task=24" not in body
+        assert "visibility=all" in body
+        assert "date_started=1690000000" in body
+        assert "billable=3600" in body
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_omits_unset_new_fields(self, server_and_client):
+        server, client = server_and_client
+
+        route = respx.post(f"{BASE}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "2003"}},
+            )
+        )
+
+        await server.call_tool(
+            "accelo_create_activity",
+            {"subject": "Plain note", "against_type": "staff", "against_id": 14},
+        )
+        await client.close()
+
+        body = route.calls[0].request.content.decode()
+        assert "task_id" not in body
+        assert "visibility" not in body
+        assert "date_started" not in body
+
+
+class TestUpdateActivity:
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_update_class_and_date_started(self, server_and_client):
+        server, client = server_and_client
+
+        route = respx.put(f"{BASE}/activities/1002").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "1002"}},
+            )
+        )
+
+        result = parse_result(
+            await server.call_tool(
+                "accelo_update_activity",
+                {"id": 1002, "class_id": 5, "date_started": 1690000000},
+            )
+        )
+        await client.close()
+
+        assert result["response"]["id"] == "1002"
+        body = route.calls[0].request.content.decode()
+        assert "class_id=5" in body
+        assert "date_started=1690000000" in body
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_update_omits_unset_new_fields(self, server_and_client):
+        server, client = server_and_client
+
+        route = respx.put(f"{BASE}/activities/1002").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "1002"}},
+            )
+        )
+
+        await server.call_tool(
+            "accelo_update_activity",
+            {"id": 1002, "subject": "Renamed"},
+        )
+        await client.close()
+
+        body = route.calls[0].request.content.decode()
+        assert "subject=Renamed" in body
+        assert "class_id" not in body
+        assert "date_started" not in body

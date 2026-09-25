@@ -1,5 +1,12 @@
 name: Release
 
+# NOTE: This file must stay named publish.yml. PyPI's Trusted Publisher matches
+# the OIDC claim on the exact workflow filename, and this project's publisher is
+# registered against publish.yml (it published v0.1.0). Renaming the file breaks
+# the trusted-publishing exchange with "invalid-publisher". The workflow's display
+# name is "Release" because it does more than publish; the filename is the
+# load-bearing identifier.
+#
 # Turns a version bump on main into a full release. When a push to main changes
 # the project version in pyproject.toml, this workflow validates the package,
 # creates the matching v<version> tag and a GitHub Release, then builds and

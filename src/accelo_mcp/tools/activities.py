@@ -113,6 +113,9 @@ def register(server: MCPServer, client: AcceloClient):
         owner_id: int | None = None,
         billable: int | None = None,
         nonbillable: int | None = None,
+        task: int | None = None,
+        visibility: str | None = None,
+        date_started: int | None = None,
         fields: str | None = None,
     ) -> dict:
         """Create a new activity (note, email, call, or meeting).
@@ -130,6 +133,16 @@ def register(server: MCPServer, client: AcceloClient):
             owner_id: Owner ID (staff_id or affiliation_id)
             billable: Billable time in seconds
             nonbillable: Non-billable time in seconds
+            task: Task ID to log the activity against. To log time against a task,
+                set against_type/against_id to the task's PARENT (job/milestone/issue)
+                and pass the task ID here (sent to Accelo as task_id).
+            visibility: Activity visibility — 'private' (default), 'confidential',
+                or 'all'. MUST be 'all' to log billable/non-billable time; the Accelo
+                default of 'private' silently prevents time logging.
+            date_started: Start date as a unix timestamp (seconds since UTC). For
+                meetings this is the scheduled start; for other activities it sets the
+                logged date (date_logged derives from date_started, falling back to
+                date_created when unset).
             fields: Additional fields to return
         """
         data: dict[str, Any] = {
@@ -153,6 +166,12 @@ def register(server: MCPServer, client: AcceloClient):
             data["billable"] = billable
         if nonbillable is not None:
             data["nonbillable"] = nonbillable
+        if task is not None:
+            data["task_id"] = task
+        if visibility:
+            data["visibility"] = visibility
+        if date_started is not None:
+            data["date_started"] = date_started
         if fields:
             data["_fields"] = fields
         return await client.post("/activities", data=data)
@@ -164,8 +183,10 @@ def register(server: MCPServer, client: AcceloClient):
         body: str | None = None,
         visibility: str | None = None,
         priority_id: int | None = None,
+        class_id: int | None = None,
         billable: int | None = None,
         nonbillable: int | None = None,
+        date_started: int | None = None,
         fields: str | None = None,
     ) -> dict:
         """Update an existing activity.
@@ -176,8 +197,12 @@ def register(server: MCPServer, client: AcceloClient):
             body: New body (only if owner)
             visibility: New visibility
             priority_id: New priority ID
+            class_id: New activity class ID
             billable: Billable time in seconds
             nonbillable: Non-billable time in seconds
+            date_started: New start date as a unix timestamp (seconds since UTC).
+                For meetings this is the scheduled start; otherwise it sets the
+                logged date (date_logged derives from date_started).
             fields: Additional fields to return
         """
         data: dict[str, Any] = {}
@@ -189,10 +214,14 @@ def register(server: MCPServer, client: AcceloClient):
             data["visibility"] = visibility
         if priority_id is not None:
             data["priority_id"] = priority_id
+        if class_id is not None:
+            data["class_id"] = class_id
         if billable is not None:
             data["billable"] = billable
         if nonbillable is not None:
             data["nonbillable"] = nonbillable
+        if date_started is not None:
+            data["date_started"] = date_started
         if fields:
             data["_fields"] = fields
         return await client.put(f"/activities/{id}", data=data)

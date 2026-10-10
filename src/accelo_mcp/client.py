@@ -131,12 +131,20 @@ class AcceloClient:
                 response.status_code,
             )
 
-        # Check for API-level errors
+        # Check for API-level errors.
+        #
+        # Accelo signals success with meta.status == "ok". A non-ok status must
+        # always be treated as an error, even on an HTTP 200 — some malformed
+        # writes return a non-ok meta with a 200 code, and the previous
+        # `status != "ok" and status_code >= 400` guard let those through as
+        # success. We also raise on a 4xx/5xx that carries no (or an unexpected)
+        # meta block so the HTTP failure is never silently returned.
         meta = result.get("meta", {})
-        if meta.get("status") != "ok" and response.status_code >= 400:
+        status = meta.get("status")
+        if (status is not None and status != "ok") or response.status_code >= 400:
             raise AcceloAPIError(
-                status=meta.get("status", "unknown"),
-                message=meta.get("message", response.text[:200]),
+                status=status or "unknown",
+                message=meta.get("message") or response.text[:200],
                 http_code=response.status_code,
                 more_info=meta.get("more_info", ""),
             )

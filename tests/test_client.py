@@ -242,6 +242,73 @@ class TestAcceloClientRequests:
 
     @respx.mock
     @pytest.mark.asyncio
+    async def test_non_ok_meta_on_200_raises(self, mock_config):
+        """Raises AcceloAPIError when meta.status != 'ok' even on HTTP 200.
+
+        Some malformed writes return a non-ok meta with a 200 status code. The
+        error must not be swallowed and returned as success.
+        """
+        from accelo_mcp.client import AcceloAPIError
+
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        respx.put(f"{mock_config.base_url}/contracts/29").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "meta": {
+                        "status": "invalid_request",
+                        "message": "The resource endpoint was not recognized.",
+                        "more_info": "https://api.accelo.com/docs",
+                    }
+                },
+            )
+        )
+
+        with pytest.raises(AcceloAPIError) as exc_info:
+            await client.put("/contracts/29", data={"profile.80": "x"})
+        await client.close()
+
+        assert exc_info.value.status == "invalid_request"
+        assert "resource endpoint" in exc_info.value.message
+        assert exc_info.value.http_code == 200
+        assert exc_info.value.more_info == "https://api.accelo.com/docs"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_4xx_without_ok_meta_raises(self, mock_config):
+        """Raises AcceloAPIError on a 4xx regardless of meta contents."""
+        from accelo_mcp.client import AcceloAPIError
+
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        respx.get(f"{mock_config.base_url}/companies/404").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "meta": {
+                        "status": "invalid_request",
+                        "message": "The resource endpoint was not recognized.",
+                    }
+                },
+            )
+        )
+
+        with pytest.raises(AcceloAPIError) as exc_info:
+            await client.get("/companies/404")
+        await client.close()
+
+        assert exc_info.value.http_code == 400
+        assert exc_info.value.status == "invalid_request"
+
+    @respx.mock
+    @pytest.mark.asyncio
     async def test_5xx_retry(self, mock_config):
         """Retries once on 5xx."""
         auth = AuthManager(mock_config)

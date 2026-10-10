@@ -309,6 +309,31 @@ class TestAcceloClientRequests:
 
     @respx.mock
     @pytest.mark.asyncio
+    async def test_ok_meta_trusted_over_http_code(self, mock_config):
+        """When meta.status == 'ok' is present it is trusted over the HTTP code.
+
+        Accelo reports the real outcome in meta.status; a present 'ok' status is
+        authoritative, so the response is returned rather than raised on.
+        """
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        respx.get(f"{mock_config.base_url}/companies/1").mock(
+            return_value=httpx.Response(
+                400,
+                json={"meta": {"status": "ok"}, "response": {"id": "1"}},
+            )
+        )
+
+        result = await client.get("/companies/1")
+        await client.close()
+
+        assert result["response"]["id"] == "1"
+
+    @respx.mock
+    @pytest.mark.asyncio
     async def test_5xx_retry(self, mock_config):
         """Retries once on 5xx."""
         auth = AuthManager(mock_config)

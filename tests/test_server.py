@@ -78,6 +78,20 @@ class TestHttpTransportSettings:
         settings = HttpTransportSettings.from_env()
         assert settings.allowed_hosts is None
 
+    def test_invalid_port_raises(self, monkeypatch):
+        monkeypatch.setenv("ACCELO_MCP_PORT", "not-a-number")
+        with pytest.raises(ValueError, match="ACCELO_MCP_PORT"):
+            HttpTransportSettings.from_env()
+
+    def test_out_of_range_port_raises(self, monkeypatch):
+        monkeypatch.setenv("ACCELO_MCP_PORT", "70000")
+        with pytest.raises(ValueError, match="between 1 and 65535"):
+            HttpTransportSettings.from_env()
+
+    def test_unset_port_uses_default(self, monkeypatch):
+        monkeypatch.delenv("ACCELO_MCP_PORT", raising=False)
+        assert HttpTransportSettings.from_env().port == 3000
+
 
 class TestTransportSecurity:
     def test_none_when_all_defaults(self):

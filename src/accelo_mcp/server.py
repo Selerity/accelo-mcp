@@ -58,6 +58,26 @@ def _env_list(name: str) -> list[str] | None:
     return items or None
 
 
+def _env_port(name: str, default: int) -> int:
+    """Read a TCP port from the environment, with a clear error on bad input.
+
+    A misconfigured port is an operator mistake we want surfaced, not hidden by
+    a silent fallback to the default (which would leave the server listening on
+    the wrong port). We raise a descriptive ValueError instead of letting the
+    bare int() conversion crash with an opaque message.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        port = int(value)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer port number, got {value!r}") from None
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{name} must be between 1 and 65535, got {port}")
+    return port
+
+
 @dataclass(frozen=True)
 class HttpTransportSettings:
     """Settings for the HTTP transports (Streamable HTTP and SSE).
@@ -96,7 +116,7 @@ class HttpTransportSettings:
         """
         return cls(
             host=os.environ.get("ACCELO_MCP_HOST", "127.0.0.1"),
-            port=int(os.environ.get("ACCELO_MCP_PORT", "3000")),
+            port=_env_port("ACCELO_MCP_PORT", 3000),
             path=os.environ.get("ACCELO_MCP_PATH", "/mcp"),
             json_response=_env_bool("ACCELO_MCP_JSON_RESPONSE"),
             stateless=_env_bool("ACCELO_MCP_STATELESS"),

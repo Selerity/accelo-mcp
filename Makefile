@@ -1,4 +1,4 @@
-.PHONY: help test lint audit format build clean dev install check ci-test ci-lint ci-audit
+.PHONY: help test lint audit format build clean dev dev-http dev-sse install check ci-test ci-lint ci-audit
 
 .DEFAULT_GOAL := help
 
@@ -15,7 +15,10 @@ install: ## Install package in editable mode with dev dependencies
 dev: ## Run MCP server in stdio mode (for local testing)
 	accelo-mcp
 
-dev-sse: ## Run the MCP server in SSE mode on port 8080
+dev-http: ## Run the MCP server over Streamable HTTP on port 8080
+	ACCELO_MCP_PORT=8080 accelo-mcp --http
+
+dev-sse: ## Run the MCP server in SSE mode on port 8080 (deprecated; prefer dev-http)
 	ACCELO_MCP_PORT=8080 accelo-mcp --sse
 
 # --- Quality ---

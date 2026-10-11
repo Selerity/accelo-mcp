@@ -63,7 +63,19 @@ Copy `.env.example` to `.env`, or provide these variables through the MCP host:
 | `ACCELO_AUTH_TYPE` | No | `web` | `web`, `service`, `installed`, or `public` |
 | `ACCELO_SCOPE` | No | `read(all)` | OAuth2 scope; defaults to read-only. Add write access explicitly, e.g. `read(all),write(all)`, only if you need the write tools |
 | `ACCELO_REDIRECT_URI` | For `web` and `public` | `http://localhost:9876/callback` (`web` only) | Local OAuth callback URL. Optional for `web` (defaults as shown); **required for `public`** with no default. Must exactly match the redirect URI registered on the Accelo application. |
-| `ACCELO_MCP_PORT` | No | `3000` | Port used by the SSE transport |
+
+HTTP transport variables (only used with `--http` or `--sse`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACCELO_MCP_HOST` | `127.0.0.1` | Interface to bind. Set to `0.0.0.0` to accept connections from outside a container. |
+| `ACCELO_MCP_PORT` | `3000` | TCP port to listen on. |
+| `ACCELO_MCP_PATH` | `/mcp` | Streamable HTTP endpoint path. |
+| `ACCELO_MCP_JSON_RESPONSE` | `false` | Return a single JSON response instead of an SSE stream. |
+| `ACCELO_MCP_STATELESS` | `false` | Run without per-session state so any node can serve any request (suits horizontally scaled deployments). |
+| `ACCELO_MCP_ALLOWED_HOSTS` | — | Comma-separated `Host` header allow-list for DNS-rebinding protection, e.g. your public hostname. Required when the server is reached through any hostname other than `localhost`. |
+| `ACCELO_MCP_ALLOWED_ORIGINS` | — | Comma-separated `Origin` header allow-list. |
+| `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION` | `false` | Disable the `Host`/`Origin` check entirely. Prefer setting the allow-lists above instead. |
 
 Create or obtain an OAuth application for the Accelo deployment you intend to access. Never commit client secrets, refresh tokens, access tokens, cookies, or webhook secrets.
 
@@ -95,7 +107,30 @@ The default transport is stdio, which is suitable for Claude Desktop, Kiro, and 
 accelo-mcp
 ```
 
-The server also supports SSE transport:
+For remote or networked hosts, run the server over **Streamable HTTP** (the current MCP HTTP transport):
+
+```bash
+accelo-mcp --http
+```
+
+This listens on `http://127.0.0.1:3000/mcp` by default. To serve from inside a
+container or behind a reverse proxy or load balancer, bind all interfaces and
+allow-list the public hostname so DNS-rebinding protection does not reject
+proxied requests:
+
+```bash
+ACCELO_MCP_HOST=0.0.0.0 \
+ACCELO_MCP_PORT=8080 \
+ACCELO_MCP_ALLOWED_HOSTS=mcp.example.com \
+ACCELO_MCP_ALLOWED_ORIGINS=https://mcp.example.com \
+accelo-mcp --http
+```
+
+Set `ACCELO_MCP_STATELESS=true` for horizontally scaled deployments where any
+instance may serve any request.
+
+The older **SSE** transport is still available but deprecated; prefer `--http`
+for new deployments:
 
 ```bash
 accelo-mcp --sse

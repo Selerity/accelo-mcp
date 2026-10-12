@@ -46,15 +46,18 @@ one — an operator who genuinely wants an exposed bind, and has their own netwo
 controls, opts in explicitly with that variable and the server starts (logging a
 warning). Loopback binds (the default) need no opt-in.
 
-When the opt-in is used but no `ACCELO_MCP_ALLOWED_HOSTS` /
-`ACCELO_MCP_ALLOWED_ORIGINS` allow-list is set, the server **also refuses to
-start**: an exposed bind with no allow-list runs with DNS-rebinding protection
-effectively off, leaving the permitted user's browser as an attack vector (see
-above). Close it by setting the Host/Origin allow-list (preferred). If you
-genuinely want no `Host`/`Origin` check and have your own controls, set
-`ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true` explicitly to allow the start.
-Once an exposed bind is allowed, the server logs a warning that it is
-unauthenticated as a reminder to restrict access.
+When the opt-in is used but no `ACCELO_MCP_ALLOWED_HOSTS` allow-list is set, the
+server **also refuses to start**: an exposed bind with no Host allow-list runs
+with DNS-rebinding protection effectively off, leaving the permitted user's
+browser as an attack vector (see above). DNS-rebinding is a `Host`-header attack,
+so an `ACCELO_MCP_ALLOWED_ORIGINS` list alone does **not** close it — you must
+name the `Host`(s) clients send in `ACCELO_MCP_ALLOWED_HOSTS`. Matching is exact
+unless an entry ends in `:*`, and clients include the bound port, so use the
+`host:*` form (e.g. `127.0.0.1:*,localhost:*` for a loopback-published container,
+or `your-host:*` behind a proxy). If you genuinely want no `Host`/`Origin` check
+and have your own controls, set `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true`
+explicitly to allow the start. Once an exposed bind is allowed, the server logs a
+warning that it is unauthenticated as a reminder to restrict access.
 
 Independently of this gate, the server always passes explicit transport-security
 settings to the MCP library (it never relies on the library auto-enabling

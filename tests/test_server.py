@@ -54,6 +54,13 @@ class TestHttpTransportSettings:
         assert settings.disable_dns_rebinding_protection is False
         assert settings.allow_unauthenticated is False
 
+    def test_host_is_stripped_in_from_env(self, monkeypatch):
+        # Whitespace must be stripped once in from_env so the checked value
+        # equals the value handed to the bind (otherwise " 127.0.0.1" passes
+        # the loopback check then fails at bind, after create_server()).
+        monkeypatch.setenv("ACCELO_MCP_HOST", "  127.0.0.1  ")
+        assert HttpTransportSettings.from_env().host == "127.0.0.1"
+
     def test_env_overrides(self, monkeypatch):
         monkeypatch.setenv("ACCELO_MCP_HOST", "0.0.0.0")
         monkeypatch.setenv("ACCELO_MCP_PORT", "8080")
@@ -127,6 +134,25 @@ class TestTransportSecurity:
         assert security is not None
         assert security.enable_dns_rebinding_protection is True
         assert security.allowed_hosts == ["mcp.example.com"]
+
+    def test_origins_only_defaults_hosts_to_loopback(self):
+        # Setting ONLY origins must not leave allowed_hosts empty (which would
+        # 421 every request) — it defaults to the loopback host allow-list.
+        settings = HttpTransportSettings(allowed_origins=["https://mcp.example.com"])
+        security = settings.transport_security()
+        assert security.enable_dns_rebinding_protection is True
+        assert security.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        assert security.allowed_origins == ["https://mcp.example.com"]
+
+    def test_hosts_only_defaults_origins_to_loopback(self):
+        settings = HttpTransportSettings(allowed_hosts=["mcp.example.com:*"])
+        security = settings.transport_security()
+        assert security.allowed_hosts == ["mcp.example.com:*"]
+        assert security.allowed_origins == [
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+            "http://[::1]:*",
+        ]
 
     def test_built_when_protection_disabled(self):
         settings = HttpTransportSettings(disable_dns_rebinding_protection=True)
@@ -207,6 +233,25 @@ class TestRebindingGap:
             allowed_hosts=["mcp.example.com"],
         )
         assert settings.has_rebinding_gap() is False
+
+    def test_non_loopback_origins_only_still_has_gap(self):
+        # DNS-rebinding is a Host-header attack; an Origin allow-list alone does
+        # not close it (and would 421 everything), so the gap persists.
+        settings = HttpTransportSettings(
+            host="0.0.0.0",
+            allow_unauthenticated=True,
+            allowed_origins=["https://mcp.example.com"],
+        )
+        assert settings.has_rebinding_gap() is True
+
+    def test_non_loopback_origins_only_refuses_at_startup(self):
+        settings = HttpTransportSettings(
+            host="0.0.0.0",
+            allow_unauthenticated=True,
+            allowed_origins=["https://mcp.example.com"],
+        )
+        with pytest.raises(RuntimeError, match="ACCELO_MCP_ALLOWED_HOSTS"):
+            settings.enforce_startup_safety("Streamable HTTP")
 
     def test_non_loopback_protection_disabled_has_no_gap(self):
         # Operator explicitly turned the check off — a deliberate choice, not a gap.

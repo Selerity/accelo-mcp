@@ -19,6 +19,16 @@ from .tools import register_all_tools
 
 logger = logging.getLogger(__name__)
 
+# Loopback Host/Origin allow-lists used as the default DNS-rebinding allow-list
+# when the operator has not supplied one. The ``:*`` suffix allows any port
+# (Host/Origin matching is exact otherwise, and clients send the bound port).
+_LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
+_LOOPBACK_ALLOWED_ORIGINS = (
+    "http://127.0.0.1:*",
+    "http://localhost:*",
+    "http://[::1]:*",
+)
+
 
 def create_server() -> tuple[MCPServer, AcceloClient]:
     """Create and configure the MCP server with all tools registered.
@@ -102,16 +112,22 @@ class HttpTransportSettings:
         """Load HTTP transport settings from environment variables.
 
         Environment variables:
-            ACCELO_MCP_HOST - interface to bind (default 127.0.0.1; set to
-                0.0.0.0 to accept connections from outside the container)
+            ACCELO_MCP_HOST - interface to bind (default 127.0.0.1). Binding a
+                non-loopback host (e.g. 0.0.0.0) exposes the server beyond the
+                local machine and requires ACCELO_MCP_ALLOW_UNAUTHENTICATED=true
+                AND an ACCELO_MCP_ALLOWED_HOSTS allow-list (see SECURITY.md).
             ACCELO_MCP_PORT - TCP port (default 3000)
             ACCELO_MCP_PATH - Streamable HTTP endpoint path (default /mcp)
             ACCELO_MCP_JSON_RESPONSE - return a single JSON response instead of
                 an SSE stream (default false)
-            ACCELO_MCP_STATELESS - run without per-session state, so any node
-                can serve any request (default false)
-            ACCELO_MCP_ALLOWED_HOSTS - comma-separated Host header allow-list
-                for DNS-rebinding protection (e.g. the public hostname)
+            ACCELO_MCP_STATELESS - run without transport-level MCP protocol
+                session state (stream resumption). This is a protocol option
+                only; it does NOT add per-user credentials or make the server
+                multi-user — the single-user scope still applies (default false)
+            ACCELO_MCP_ALLOWED_HOSTS - comma-separated Host header allow-list for
+                DNS-rebinding protection. Matching is exact unless an entry ends
+                in ':*', and clients send the port, so use the 'host:*' form
+                (e.g. 127.0.0.1:*,localhost:* or your-host:*)
             ACCELO_MCP_ALLOWED_ORIGINS - comma-separated Origin header allow-list
             ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION - disable the Host/Origin
                 check entirely (default false; prefer setting the allow-lists)
@@ -121,7 +137,7 @@ class HttpTransportSettings:
                 non-loopback bind; see SECURITY.md.
         """
         return cls(
-            host=os.environ.get("ACCELO_MCP_HOST", "127.0.0.1"),
+            host=os.environ.get("ACCELO_MCP_HOST", "127.0.0.1").strip(),
             port=_env_port("ACCELO_MCP_PORT", 3000),
             path=os.environ.get("ACCELO_MCP_PATH", "/mcp"),
             json_response=_env_bool("ACCELO_MCP_JSON_RESPONSE"),
@@ -163,10 +179,19 @@ class HttpTransportSettings:
             )
 
         if self.allowed_hosts is not None or self.allowed_origins is not None:
+            # At least one allow-list is set. Default the OTHER side to the
+            # loopback entries rather than an empty list: an empty allowed_hosts
+            # would reject (421) every request, so an operator who sets only
+            # ACCELO_MCP_ALLOWED_ORIGINS must still get working loopback Host
+            # matching (and vice versa).
             return TransportSecuritySettings(
                 enable_dns_rebinding_protection=True,
-                allowed_hosts=self.allowed_hosts or [],
-                allowed_origins=self.allowed_origins or [],
+                allowed_hosts=self.allowed_hosts
+                if self.allowed_hosts is not None
+                else list(_LOOPBACK_ALLOWED_HOSTS),
+                allowed_origins=self.allowed_origins
+                if self.allowed_origins is not None
+                else list(_LOOPBACK_ALLOWED_ORIGINS),
             )
 
         # No operator allow-list: default to the loopback allow-list the library
@@ -174,12 +199,8 @@ class HttpTransportSettings:
         # addresses so non-standard ones keep protection too.
         return TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
-            allowed_origins=[
-                "http://127.0.0.1:*",
-                "http://localhost:*",
-                "http://[::1]:*",
-            ],
+            allowed_hosts=list(_LOOPBACK_ALLOWED_HOSTS),
+            allowed_origins=list(_LOOPBACK_ALLOWED_ORIGINS),
         )
 
     def is_loopback_bind(self) -> bool:
@@ -237,22 +258,20 @@ class HttpTransportSettings:
         """Whether an exposed bind would run with DNS-rebinding protection off.
 
         The gap exists when the bind is non-loopback, the protection has not been
-        explicitly disabled, and no Host/Origin allow-list is set. In that case
-        the only Host/Origin values :meth:`transport_security` can supply are the
-        loopback defaults, which would reject (``421``) every request to the
-        exposed host — so the operator either gets a server that answers nobody,
-        or (before this gate existed) one running with protection off. Either way
-        it is unsafe-by-accident on a reachable bind, so we refuse it and make the
-        operator choose: set an allow-list (preferred) or explicitly disable the
-        check. On a loopback bind there is no gap (the loopback defaults are
-        correct), so this only fires once the server is reachable beyond the local
-        machine.
+        explicitly disabled, and no Host allow-list is set. DNS-rebinding is a
+        Host-header attack, so an Origin allow-list alone does NOT close it — and
+        worse, with only origins set :meth:`transport_security` would emit an
+        empty ``allowed_hosts``, rejecting (``421``) every request to the exposed
+        host. So the gap is keyed on ``allowed_hosts`` specifically: the operator
+        must name the Host(s) this server is reached through (or explicitly
+        disable the check). On a loopback bind there is no gap (the loopback
+        defaults are correct), so this only fires once the server is reachable
+        beyond the local machine.
         """
         return (
             not self.is_loopback_bind()
             and not self.disable_dns_rebinding_protection
             and self.allowed_hosts is None
-            and self.allowed_origins is None
         )
 
     def enforce_startup_safety(self, transport_label: str) -> None:
@@ -281,13 +300,16 @@ class HttpTransportSettings:
             raise RuntimeError(
                 f"Refusing to start: the {transport_label} transport is bound to a "
                 f"non-loopback host ({self.host!r}) with DNS-rebinding protection "
-                f"effectively off — no ACCELO_MCP_ALLOWED_HOSTS or "
-                f"ACCELO_MCP_ALLOWED_ORIGINS allow-list is set. A web page the "
-                f"permitted user visits in their browser could otherwise drive "
-                f"every tool through this server (a DNS-rebinding attack).\n"
-                f"  - Preferred: set ACCELO_MCP_ALLOWED_HOSTS to the hostname(s) "
-                f"this server is reached through (and ACCELO_MCP_ALLOWED_ORIGINS "
-                f"for browser clients).\n"
+                f"effectively off — no ACCELO_MCP_ALLOWED_HOSTS allow-list is set. "
+                f"A web page the permitted user visits in their browser could "
+                f"otherwise drive every tool through this server (a DNS-rebinding "
+                f"attack).\n"
+                f"  - Preferred: set ACCELO_MCP_ALLOWED_HOSTS to the Host "
+                f"header(s) clients send. Matching is exact unless an entry ends "
+                f"in ':*', and clients include the port — so use the 'host:*' "
+                f"form, e.g. ACCELO_MCP_ALLOWED_HOSTS=127.0.0.1:*,localhost:* for "
+                f"a loopback-published container, or your-host:* behind a proxy "
+                f"(add ACCELO_MCP_ALLOWED_ORIGINS for browser clients).\n"
                 f"  - If you genuinely want no Host/Origin check and have your own "
                 f"controls, set ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true "
                 f"explicitly.\n"

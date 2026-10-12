@@ -108,7 +108,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes
+        run: |
+          # Use hand-written RELEASE_NOTES.md when present (e.g. a release that
+          # needs migration steps or a security banner), otherwise fall back to
+          # GitHub's auto-generated "What's Changed" list.
+          if [ -f RELEASE_NOTES.md ]; then
+            gh release create "v${VERSION}" --title "v${VERSION}" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes
+          fi
 
   publish:
     needs: release

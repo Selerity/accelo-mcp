@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import sys
@@ -94,6 +95,7 @@ class HttpTransportSettings:
     allowed_hosts: list[str] | None = None
     allowed_origins: list[str] | None = None
     disable_dns_rebinding_protection: bool = False
+    allow_unauthenticated: bool = False
 
     @classmethod
     def from_env(cls) -> HttpTransportSettings:
@@ -113,6 +115,10 @@ class HttpTransportSettings:
             ACCELO_MCP_ALLOWED_ORIGINS - comma-separated Origin header allow-list
             ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION - disable the Host/Origin
                 check entirely (default false; prefer setting the allow-lists)
+            ACCELO_MCP_ALLOW_UNAUTHENTICATED - explicitly acknowledge that the
+                HTTP transport has no inbound authentication and may be bound to
+                a non-loopback interface (default false). Required to start on a
+                non-loopback bind; see SECURITY.md.
         """
         return cls(
             host=os.environ.get("ACCELO_MCP_HOST", "127.0.0.1"),
@@ -125,6 +131,7 @@ class HttpTransportSettings:
             disable_dns_rebinding_protection=_env_bool(
                 "ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION"
             ),
+            allow_unauthenticated=_env_bool("ACCELO_MCP_ALLOW_UNAUTHENTICATED"),
         )
 
     def transport_security(self) -> TransportSecuritySettings | None:
@@ -147,6 +154,57 @@ class HttpTransportSettings:
             enable_dns_rebinding_protection=not self.disable_dns_rebinding_protection,
             allowed_hosts=self.allowed_hosts or [],
             allowed_origins=self.allowed_origins or [],
+        )
+
+    def is_loopback_bind(self) -> bool:
+        """Whether the configured host binds to a loopback interface only.
+
+        ``127.0.0.1``/``::1`` (and the rest of ``127.0.0.0/8``) are loopback and
+        reachable only from the local machine. ``0.0.0.0``/``::`` bind every
+        interface and are therefore NOT loopback. A hostname we cannot parse as
+        an IP address is treated as non-loopback (fail safe) unless it is the
+        literal ``localhost``.
+        """
+        host = self.host.strip()
+        if host == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            # Not an IP literal (e.g. a hostname) — treat as non-loopback so the
+            # exposure gate errs on the side of requiring the explicit opt-in.
+            return False
+
+    def check_exposure_allowed(self) -> None:
+        """Refuse an *accidental* unauthenticated non-loopback bind.
+
+        The HTTP/SSE transports have no inbound authentication: every caller is
+        served with the server's single shared Accelo identity (see SECURITY.md).
+        Binding beyond loopback therefore exposes full Accelo access to anyone
+        who can reach the port.
+
+        This is a legitimate choice for an operator who has their own network
+        controls and genuinely intends it — so it is NOT forbidden. It must only
+        be *deliberate*: starting on a non-loopback host requires the operator to
+        set ``ACCELO_MCP_ALLOW_UNAUTHENTICATED=true``. The check exists solely to
+        stop the accidental exposure (an empty config or a copied ``0.0.0.0``
+        example), never to block an intended deployment.
+
+        Raises:
+            RuntimeError: if bound to a non-loopback host without the opt-in.
+        """
+        if self.is_loopback_bind() or self.allow_unauthenticated:
+            return
+
+        raise RuntimeError(
+            f"Refusing to start: the HTTP transport has no inbound authentication "
+            f"and is bound to a non-loopback host ({self.host!r}), which exposes "
+            f"full Accelo access to anyone who can reach the port.\n"
+            f"  - To keep it local-only, set ACCELO_MCP_HOST=127.0.0.1 (the default).\n"
+            f"  - If you intend an exposed bind and have your own network controls "
+            f"(firewall, VPN, loopback-only container publish), acknowledge it "
+            f"explicitly with ACCELO_MCP_ALLOW_UNAUTHENTICATED=true.\n"
+            f"See SECURITY.md for the single-user deployment model."
         )
 
 
@@ -219,6 +277,16 @@ def main() -> None:
 
     if transport == "http":
         settings = HttpTransportSettings.from_env()
+        settings.check_exposure_allowed()
+        if not settings.is_loopback_bind():
+            logger.warning(
+                "Accelo MCP HTTP transport is bound to a non-loopback host (%s) "
+                "with NO inbound authentication (ACCELO_MCP_ALLOW_UNAUTHENTICATED "
+                "is set). Every caller that reaches this port acts with the "
+                "server's full Accelo identity. Ensure your own network controls "
+                "restrict access to the single intended user. See SECURITY.md.",
+                settings.host,
+            )
         logger.info(
             "Starting Accelo MCP server (Streamable HTTP on %s:%d%s, "
             "stateless=%s, json_response=%s)",
@@ -231,6 +299,16 @@ def main() -> None:
         asyncio.run(run_streamable_http(settings))
     elif transport == "sse":
         settings = HttpTransportSettings.from_env()
+        settings.check_exposure_allowed()
+        if not settings.is_loopback_bind():
+            logger.warning(
+                "Accelo MCP SSE transport is bound to a non-loopback host (%s) "
+                "with NO inbound authentication (ACCELO_MCP_ALLOW_UNAUTHENTICATED "
+                "is set). Every caller that reaches this port acts with the "
+                "server's full Accelo identity. Ensure your own network controls "
+                "restrict access to the single intended user. See SECURITY.md.",
+                settings.host,
+            )
         logger.warning(
             "The SSE transport is deprecated; prefer --http (Streamable HTTP). "
             "Starting Accelo MCP server (SSE on %s:%d)",

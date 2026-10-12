@@ -35,6 +35,7 @@ class TestHttpTransportSettings:
             "ACCELO_MCP_ALLOWED_HOSTS",
             "ACCELO_MCP_ALLOWED_ORIGINS",
             "ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION",
+            "ACCELO_MCP_ALLOW_UNAUTHENTICATED",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -48,6 +49,7 @@ class TestHttpTransportSettings:
         assert settings.allowed_hosts is None
         assert settings.allowed_origins is None
         assert settings.disable_dns_rebinding_protection is False
+        assert settings.allow_unauthenticated is False
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.setenv("ACCELO_MCP_HOST", "0.0.0.0")
@@ -115,3 +117,55 @@ class TestTransportSecurity:
     def test_bool_parsing(self, monkeypatch, value, expected):
         monkeypatch.setenv("ACCELO_MCP_STATELESS", value)
         assert HttpTransportSettings.from_env().stateless is expected
+
+
+class TestLoopbackDetection:
+    @pytest.mark.parametrize(
+        "host,expected",
+        [
+            ("127.0.0.1", True),
+            ("127.0.0.5", True),
+            ("::1", True),
+            ("localhost", True),
+            ("0.0.0.0", False),
+            ("::", False),
+            ("192.168.1.10", False),
+            ("10.0.0.3", False),
+            ("mcp.example.com", False),
+        ],
+    )
+    def test_is_loopback_bind(self, host, expected):
+        assert HttpTransportSettings(host=host).is_loopback_bind() is expected
+
+
+class TestExposureGate:
+    def test_loopback_without_optin_is_allowed(self):
+        # Default bind is loopback — no opt-in required, no error.
+        HttpTransportSettings(host="127.0.0.1").check_exposure_allowed()
+
+    def test_ipv6_loopback_without_optin_is_allowed(self):
+        HttpTransportSettings(host="::1").check_exposure_allowed()
+
+    def test_non_loopback_without_optin_refuses(self):
+        settings = HttpTransportSettings(host="0.0.0.0")
+        with pytest.raises(RuntimeError, match="Refusing to start"):
+            settings.check_exposure_allowed()
+
+    def test_non_loopback_error_names_the_optin_var(self):
+        settings = HttpTransportSettings(host="0.0.0.0")
+        with pytest.raises(RuntimeError, match="ACCELO_MCP_ALLOW_UNAUTHENTICATED"):
+            settings.check_exposure_allowed()
+
+    def test_non_loopback_with_optin_is_allowed(self):
+        # Intentional exposed bind: opt-in present, so startup proceeds.
+        HttpTransportSettings(host="0.0.0.0", allow_unauthenticated=True).check_exposure_allowed()
+
+    def test_hostname_without_optin_refuses(self):
+        # A non-IP hostname is treated as non-loopback (fail safe).
+        settings = HttpTransportSettings(host="mcp.example.com")
+        with pytest.raises(RuntimeError):
+            settings.check_exposure_allowed()
+
+    def test_optin_loaded_from_env(self, monkeypatch):
+        monkeypatch.setenv("ACCELO_MCP_ALLOW_UNAUTHENTICATED", "true")
+        assert HttpTransportSettings.from_env().allow_unauthenticated is True

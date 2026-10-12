@@ -47,9 +47,19 @@ controls, opts in explicitly with that variable and the server starts (logging a
 warning). Loopback binds (the default) need no opt-in.
 
 When the opt-in is used but no `ACCELO_MCP_ALLOWED_HOSTS` /
-`ACCELO_MCP_ALLOWED_ORIGINS` allow-list is set, the server additionally logs a
-warning that DNS-rebinding protection is off, because an exposed bind with no
-allow-list leaves the permitted user's browser as an attack vector (see above).
+`ACCELO_MCP_ALLOWED_ORIGINS` allow-list is set, the server **also refuses to
+start**: an exposed bind with no allow-list runs with DNS-rebinding protection
+effectively off, leaving the permitted user's browser as an attack vector (see
+above). Close it by setting the Host/Origin allow-list (preferred). If you
+genuinely want no `Host`/`Origin` check and have your own controls, set
+`ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true` explicitly to allow the start.
+Once an exposed bind is allowed, the server logs a warning that it is
+unauthenticated as a reminder to restrict access.
+
+Independently of this gate, the server always passes explicit transport-security
+settings to the MCP library (it never relies on the library auto-enabling
+protection for the three hard-coded localhost strings), so a non-standard
+loopback bind such as `127.0.0.5` keeps DNS-rebinding protection on.
 
 Running the HTTP transport reachable by parties other than the single intended
 user is outside the supported use of this project.

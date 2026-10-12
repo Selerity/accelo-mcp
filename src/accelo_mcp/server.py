@@ -134,26 +134,52 @@ class HttpTransportSettings:
             allow_unauthenticated=_env_bool("ACCELO_MCP_ALLOW_UNAUTHENTICATED"),
         )
 
-    def transport_security(self) -> TransportSecuritySettings | None:
-        """Build TransportSecuritySettings, or None to keep library defaults.
+    def transport_security(self) -> TransportSecuritySettings:
+        """Build an explicit TransportSecuritySettings for the HTTP transports.
 
-        DNS-rebinding protection is on by default in the MCP library. When the
-        server is reached through a hostname other than localhost (behind a
-        proxy or load balancer), that check rejects every request unless the
-        expected Host/Origin values are allow-listed here, or the check is
-        explicitly disabled.
+        We ALWAYS return explicit settings rather than ``None``. The MCP library
+        only auto-enables DNS-rebinding protection when it is handed ``None`` AND
+        the host is one of exactly ``127.0.0.1``, ``localhost`` or ``::1`` — so a
+        non-standard loopback bind (e.g. ``127.0.0.5``, ``::ffff:127.0.0.1``) or
+        any non-loopback host would otherwise fall through to protection *off*.
+        Constructing the settings ourselves closes that gap (advisory remediation
+        item 3): the protection state no longer depends on the library matching a
+        hard-coded host string.
+
+        Resolution:
+          - Explicitly disabled -> protection off (operator's deliberate choice).
+          - Operator allow-lists set -> use them.
+          - Otherwise -> protection on with the loopback allow-list, matching the
+            library's localhost defaults. On a loopback bind this is exactly what
+            the library would have applied for ``127.0.0.1`` et al.; the exposure
+            gate ensures a non-loopback bind never reaches here without either an
+            allow-list or an explicit disable.
         """
-        if (
-            not self.disable_dns_rebinding_protection
-            and self.allowed_hosts is None
-            and self.allowed_origins is None
-        ):
-            return None
+        if self.disable_dns_rebinding_protection:
+            return TransportSecuritySettings(
+                enable_dns_rebinding_protection=False,
+                allowed_hosts=self.allowed_hosts or [],
+                allowed_origins=self.allowed_origins or [],
+            )
 
+        if self.allowed_hosts is not None or self.allowed_origins is not None:
+            return TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=self.allowed_hosts or [],
+                allowed_origins=self.allowed_origins or [],
+            )
+
+        # No operator allow-list: default to the loopback allow-list the library
+        # would use for a standard localhost bind, but apply it for ALL loopback
+        # addresses so non-standard ones keep protection too.
         return TransportSecuritySettings(
-            enable_dns_rebinding_protection=not self.disable_dns_rebinding_protection,
-            allowed_hosts=self.allowed_hosts or [],
-            allowed_origins=self.allowed_origins or [],
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=[
+                "http://127.0.0.1:*",
+                "http://localhost:*",
+                "http://[::1]:*",
+            ],
         )
 
     def is_loopback_bind(self) -> bool:
@@ -208,14 +234,19 @@ class HttpTransportSettings:
         )
 
     def has_rebinding_gap(self) -> bool:
-        """Whether DNS-rebinding protection is effectively off on an exposed bind.
+        """Whether an exposed bind would run with DNS-rebinding protection off.
 
         The gap exists when the bind is non-loopback, the protection has not been
-        explicitly disabled, and no Host/Origin allow-list is set — because in
-        that case :meth:`transport_security` returns ``None`` and the MCP library
-        falls back to running with rebinding protection disabled. On a loopback
-        bind this is harmless (the library's localhost defaults apply), so it is
-        only a concern once the server is reachable beyond the local machine.
+        explicitly disabled, and no Host/Origin allow-list is set. In that case
+        the only Host/Origin values :meth:`transport_security` can supply are the
+        loopback defaults, which would reject (``421``) every request to the
+        exposed host — so the operator either gets a server that answers nobody,
+        or (before this gate existed) one running with protection off. Either way
+        it is unsafe-by-accident on a reachable bind, so we refuse it and make the
+        operator choose: set an allow-list (preferred) or explicitly disable the
+        check. On a loopback bind there is no gap (the loopback defaults are
+        correct), so this only fires once the server is reachable beyond the local
+        machine.
         """
         return (
             not self.is_loopback_bind()
@@ -227,15 +258,40 @@ class HttpTransportSettings:
     def enforce_startup_safety(self, transport_label: str) -> None:
         """Run the HTTP/SSE start-up safety checks for ``transport_label``.
 
-        Single home for the behaviour both transports share: refuse an accidental
-        unauthenticated non-loopback bind, then — when an exposed bind is allowed
-        — warn that the transport is unauthenticated and, separately, warn if
-        DNS-rebinding protection is effectively off (no allow-list set).
+        Single home for the behaviour both transports share:
+          1. Refuse an accidental unauthenticated non-loopback bind
+             (:meth:`check_exposure_allowed`).
+          2. Refuse an exposed bind that would run with DNS-rebinding protection
+             off because no allow-list is configured (:meth:`has_rebinding_gap`).
+             This is advisory finding 2: a web page in the permitted user's
+             browser could otherwise drive every tool. The operator closes it by
+             setting ``ACCELO_MCP_ALLOWED_HOSTS`` / ``ACCELO_MCP_ALLOWED_ORIGINS``
+             (preferred) or, if they truly want it off, setting
+             ``ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true`` deliberately.
+          3. On an allowed exposed bind, warn that the transport is
+             unauthenticated so the operator is reminded to restrict access.
 
         Raises:
-            RuntimeError: if bound to a non-loopback host without the opt-in.
+            RuntimeError: if the bind is refused by check (1) or (2).
         """
         self.check_exposure_allowed()
+
+        if self.has_rebinding_gap():
+            raise RuntimeError(
+                f"Refusing to start: the {transport_label} transport is bound to a "
+                f"non-loopback host ({self.host!r}) with DNS-rebinding protection "
+                f"effectively off — no ACCELO_MCP_ALLOWED_HOSTS or "
+                f"ACCELO_MCP_ALLOWED_ORIGINS allow-list is set. A web page the "
+                f"permitted user visits in their browser could otherwise drive "
+                f"every tool through this server (advisory finding 2).\n"
+                f"  - Preferred: set ACCELO_MCP_ALLOWED_HOSTS to the hostname(s) "
+                f"this server is reached through (and ACCELO_MCP_ALLOWED_ORIGINS "
+                f"for browser clients).\n"
+                f"  - If you genuinely want no Host/Origin check and have your own "
+                f"controls, set ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true "
+                f"explicitly.\n"
+                f"See SECURITY.md."
+            )
 
         if not self.is_loopback_bind():
             logger.warning(
@@ -246,17 +302,6 @@ class HttpTransportSettings:
                 "restrict access to the single intended user. See SECURITY.md.",
                 transport_label,
                 self.host,
-            )
-
-        if self.has_rebinding_gap():
-            logger.warning(
-                "DNS-rebinding protection is OFF for the %s transport: it is "
-                "bound to a non-loopback host with no ACCELO_MCP_ALLOWED_HOSTS / "
-                "ACCELO_MCP_ALLOWED_ORIGINS allow-list. A malicious web page the "
-                "permitted user visits could drive the server through their "
-                "browser. Set the Host/Origin allow-list (preferred) to close "
-                "this. See SECURITY.md.",
-                transport_label,
             )
 
 
@@ -328,8 +373,7 @@ def main() -> None:
     transport = select_transport(sys.argv)
 
     if transport == "http":
-        settings = HttpTransportSettings.from_env()
-        settings.enforce_startup_safety("Streamable HTTP")
+        settings = _load_http_settings_or_exit("Streamable HTTP")
         logger.info(
             "Starting Accelo MCP server (Streamable HTTP on %s:%d%s, "
             "stateless=%s, json_response=%s)",
@@ -341,8 +385,7 @@ def main() -> None:
         )
         asyncio.run(run_streamable_http(settings))
     elif transport == "sse":
-        settings = HttpTransportSettings.from_env()
-        settings.enforce_startup_safety("SSE")
+        settings = _load_http_settings_or_exit("SSE")
         logger.warning(
             "The SSE transport is deprecated; prefer --http (Streamable HTTP). "
             "Starting Accelo MCP server (SSE on %s:%d)",
@@ -353,6 +396,22 @@ def main() -> None:
     else:
         logger.info("Starting Accelo MCP server (stdio transport)")
         asyncio.run(run_stdio())
+
+
+def _load_http_settings_or_exit(transport_label: str) -> HttpTransportSettings:
+    """Load HTTP settings and run the start-up safety checks, exiting cleanly.
+
+    A misconfiguration (bad port) or a refused unsafe bind is an operator error,
+    not an internal fault — so we surface just the message via ``SystemExit``
+    rather than letting a full Python traceback bury it. Same pattern as the
+    existing bad-port error.
+    """
+    try:
+        settings = HttpTransportSettings.from_env()
+        settings.enforce_startup_safety(transport_label)
+    except (ValueError, RuntimeError) as exc:
+        raise SystemExit(str(exc)) from None
+    return settings
 
 
 if __name__ == "__main__":

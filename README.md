@@ -81,8 +81,8 @@ HTTP transport variables (only used with `--http` or `--sse`):
 | `ACCELO_MCP_STATELESS` | `false` | Run without per-session MCP protocol state. This only affects the transport-level session the MCP library tracks; it does **not** add per-user credentials — every request still uses the one shared Accelo identity (see the single-user scope note above). |
 | `ACCELO_MCP_ALLOWED_HOSTS` | — | Comma-separated `Host` header allow-list for DNS-rebinding protection, e.g. your public hostname. Required when the server is reached through any hostname other than `localhost`. |
 | `ACCELO_MCP_ALLOWED_ORIGINS` | — | Comma-separated `Origin` header allow-list. |
-| `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION` | `false` | Disable the `Host`/`Origin` check entirely. Prefer setting the allow-lists above instead. |
-| `ACCELO_MCP_ALLOW_UNAUTHENTICATED` | `false` | Acknowledge that the HTTP transport has no inbound authentication. **Required to start on a non-loopback bind** (e.g. `0.0.0.0`); the server refuses to start on a non-loopback host without it, to prevent accidental exposure. See [`SECURITY.md`](SECURITY.md). |
+| `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION` | `false` | Disable the `Host`/`Origin` check entirely. Prefer setting the allow-lists above instead. On a non-loopback bind, this is the explicit override that lets the server start with no allow-list (otherwise it refuses — see below). |
+| `ACCELO_MCP_ALLOW_UNAUTHENTICATED` | `false` | Acknowledge that the HTTP transport has no inbound authentication. **Required to start on a non-loopback bind** (e.g. `0.0.0.0`); the server refuses to start on a non-loopback host without it, to prevent accidental exposure. On a non-loopback bind the server **also** requires `ACCELO_MCP_ALLOWED_HOSTS`/`ACCELO_MCP_ALLOWED_ORIGINS` (or an explicit `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true`), otherwise it refuses because DNS-rebinding protection would be off. See [`SECURITY.md`](SECURITY.md). |
 
 Create or obtain an OAuth application for the Accelo deployment you intend to access. Never commit client secrets, refresh tokens, access tokens, cookies, or webhook secrets.
 
@@ -154,10 +154,16 @@ The server refuses to start on a non-loopback host unless you set
 `ACCELO_MCP_ALLOW_UNAUTHENTICATED=true`, acknowledging that it has no inbound
 authentication. This stops *accidental* exposure (an empty `ACCELO_MCP_HOST=`
 value or a copied example); it does not block an intended exposed bind — you opt
-in explicitly. Here `ACCELO_MCP_HOST=0.0.0.0` only binds all interfaces *inside*
-the container; the `-p 127.0.0.1:8080:8080` publish is what keeps it reachable
-only from the host. An IP restriction alone does not stop DNS-rebinding, so keep
-the Host/Origin allow-list set regardless.
+in explicitly. On a non-loopback bind the server **also** requires a Host/Origin
+allow-list (`ACCELO_MCP_ALLOWED_HOSTS`/`ACCELO_MCP_ALLOWED_ORIGINS`), as in the
+example above — without one it refuses, because DNS-rebinding protection would
+otherwise be off and the permitted user's browser becomes an attack vector. If
+you truly want no `Host`/`Origin` check, set
+`ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true` explicitly. Here
+`ACCELO_MCP_HOST=0.0.0.0` only binds all interfaces *inside* the container; the
+`-p 127.0.0.1:8080:8080` publish is what keeps it reachable only from the host.
+An IP restriction alone does not stop DNS-rebinding, so keep the Host/Origin
+allow-list set regardless.
 
 `ACCELO_MCP_STATELESS=true` runs the transport without per-session MCP protocol
 state. This only affects the protocol-level session the MCP library tracks for

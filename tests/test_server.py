@@ -99,9 +99,27 @@ class TestHttpTransportSettings:
 
 
 class TestTransportSecurity:
-    def test_none_when_all_defaults(self):
+    def test_defaults_to_explicit_loopback_allow_list(self):
+        # Never None: a default (loopback) bind gets explicit settings with the
+        # loopback allow-list, so protection does not depend on the library
+        # matching a hard-coded host string.
         settings = HttpTransportSettings()
-        assert settings.transport_security() is None
+        security = settings.transport_security()
+        assert security is not None
+        assert security.enable_dns_rebinding_protection is True
+        assert security.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        assert security.allowed_origins == [
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+            "http://[::1]:*",
+        ]
+
+    def test_non_standard_loopback_still_gets_protection(self):
+        # 127.0.0.5 is loopback but NOT one of the library's three auto-enable
+        # strings — our explicit settings keep protection on for it.
+        security = HttpTransportSettings(host="127.0.0.5").transport_security()
+        assert security.enable_dns_rebinding_protection is True
+        assert security.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 
     def test_built_when_allow_hosts_set(self):
         settings = HttpTransportSettings(allowed_hosts=["mcp.example.com"])
@@ -199,13 +217,22 @@ class TestRebindingGap:
         )
         assert settings.has_rebinding_gap() is False
 
-    def test_warns_on_empty_allow_list_when_opted_in(self, caplog):
+    def test_warns_unauth_but_refuses_on_empty_allow_list_when_opted_in(self):
+        # Exposed bind, opt-in present, but no allow-list -> now a REFUSAL
+        # (advisory finding 2), not a warning.
         settings = HttpTransportSettings(host="0.0.0.0", allow_unauthenticated=True)
-        with caplog.at_level("WARNING"):
+        with pytest.raises(RuntimeError, match="DNS-rebinding protection"):
             settings.enforce_startup_safety("Streamable HTTP")
-        assert any("DNS-rebinding protection is OFF" in r.message for r in caplog.records)
 
-    def test_no_rebinding_warning_when_allow_list_set(self, caplog):
+    def test_rebinding_refusal_names_the_allow_list_and_disable_vars(self):
+        settings = HttpTransportSettings(host="0.0.0.0", allow_unauthenticated=True)
+        with pytest.raises(RuntimeError) as exc:
+            settings.enforce_startup_safety("Streamable HTTP")
+        message = str(exc.value)
+        assert "ACCELO_MCP_ALLOWED_HOSTS" in message
+        assert "ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION" in message
+
+    def test_allow_list_set_starts_and_warns_unauthenticated(self, caplog):
         settings = HttpTransportSettings(
             host="0.0.0.0",
             allow_unauthenticated=True,
@@ -213,7 +240,20 @@ class TestRebindingGap:
         )
         with caplog.at_level("WARNING"):
             settings.enforce_startup_safety("Streamable HTTP")
-        assert not any("DNS-rebinding protection is OFF" in r.message for r in caplog.records)
+        # No rebinding refusal; unauthenticated warning still fires.
+        assert any("NO inbound authentication" in r.message for r in caplog.records)
+        assert not any("DNS-rebinding" in r.message for r in caplog.records)
+
+    def test_explicit_disable_starts_despite_no_allow_list(self, caplog):
+        # Operator deliberately turned the check off — allowed, not refused.
+        settings = HttpTransportSettings(
+            host="0.0.0.0",
+            allow_unauthenticated=True,
+            disable_dns_rebinding_protection=True,
+        )
+        with caplog.at_level("WARNING"):
+            settings.enforce_startup_safety("Streamable HTTP")
+        assert any("NO inbound authentication" in r.message for r in caplog.records)
 
 
 class TestEnforceStartupSafety:
@@ -242,9 +282,11 @@ class TestMainRefusesBeforeAuth:
     def _clear_env(self, monkeypatch):
         for var in (
             "ACCELO_MCP_HOST",
+            "ACCELO_MCP_PORT",
             "ACCELO_MCP_ALLOW_UNAUTHENTICATED",
             "ACCELO_MCP_ALLOWED_HOSTS",
             "ACCELO_MCP_ALLOWED_ORIGINS",
+            "ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -257,5 +299,26 @@ class TestMainRefusesBeforeAuth:
         monkeypatch.setattr(server_module, "create_server", self._boom)
         monkeypatch.setattr(sys, "argv", ["accelo-mcp", flag])
 
-        with pytest.raises(RuntimeError, match="Refusing to start"):
+        # main() converts the refusal to a clean SystemExit (no traceback).
+        with pytest.raises(SystemExit, match="Refusing to start"):
+            main()
+
+    @pytest.mark.parametrize("flag", ["--http", "--sse"])
+    def test_main_refuses_rebinding_gap_before_create_server(self, monkeypatch, flag):
+        # Opted in but no allow-list -> rebinding-gap refusal, still before auth.
+        monkeypatch.setenv("ACCELO_MCP_HOST", "0.0.0.0")
+        monkeypatch.setenv("ACCELO_MCP_ALLOW_UNAUTHENTICATED", "true")
+        monkeypatch.setattr(server_module, "create_server", self._boom)
+        monkeypatch.setattr(sys, "argv", ["accelo-mcp", flag])
+
+        with pytest.raises(SystemExit, match="DNS-rebinding protection"):
+            main()
+
+    def test_main_bad_port_exits_cleanly(self, monkeypatch):
+        # The bad-port misconfiguration surfaces as a clean SystemExit too.
+        monkeypatch.setenv("ACCELO_MCP_PORT", "not-a-number")
+        monkeypatch.setattr(server_module, "create_server", self._boom)
+        monkeypatch.setattr(sys, "argv", ["accelo-mcp", "--http"])
+
+        with pytest.raises(SystemExit, match="ACCELO_MCP_PORT"):
             main()

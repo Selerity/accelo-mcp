@@ -219,7 +219,7 @@ class TestRebindingGap:
 
     def test_warns_unauth_but_refuses_on_empty_allow_list_when_opted_in(self):
         # Exposed bind, opt-in present, but no allow-list -> now a REFUSAL
-        # (advisory finding 2), not a warning.
+        # (DNS-rebinding gap), not a warning.
         settings = HttpTransportSettings(host="0.0.0.0", allow_unauthenticated=True)
         with pytest.raises(RuntimeError, match="DNS-rebinding protection"):
             settings.enforce_startup_safety("Streamable HTTP")

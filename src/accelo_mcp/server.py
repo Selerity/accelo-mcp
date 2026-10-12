@@ -142,9 +142,9 @@ class HttpTransportSettings:
         the host is one of exactly ``127.0.0.1``, ``localhost`` or ``::1`` — so a
         non-standard loopback bind (e.g. ``127.0.0.5``, ``::ffff:127.0.0.1``) or
         any non-loopback host would otherwise fall through to protection *off*.
-        Constructing the settings ourselves closes that gap (advisory remediation
-        item 3): the protection state no longer depends on the library matching a
-        hard-coded host string.
+        Constructing the settings ourselves closes that gap: the protection state
+        no longer depends on the library matching a hard-coded host string. See
+        SECURITY.md for the deployment model this protects.
 
         Resolution:
           - Explicitly disabled -> protection off (operator's deliberate choice).
@@ -263,9 +263,10 @@ class HttpTransportSettings:
              (:meth:`check_exposure_allowed`).
           2. Refuse an exposed bind that would run with DNS-rebinding protection
              off because no allow-list is configured (:meth:`has_rebinding_gap`).
-             This is advisory finding 2: a web page in the permitted user's
-             browser could otherwise drive every tool. The operator closes it by
-             setting ``ACCELO_MCP_ALLOWED_HOSTS`` / ``ACCELO_MCP_ALLOWED_ORIGINS``
+             Without a Host/Origin allow-list, a web page in the permitted user's
+             browser could otherwise drive every tool (a DNS-rebinding attack —
+             see SECURITY.md). The operator closes it by setting
+             ``ACCELO_MCP_ALLOWED_HOSTS`` / ``ACCELO_MCP_ALLOWED_ORIGINS``
              (preferred) or, if they truly want it off, setting
              ``ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true`` deliberately.
           3. On an allowed exposed bind, warn that the transport is
@@ -283,7 +284,7 @@ class HttpTransportSettings:
                 f"effectively off — no ACCELO_MCP_ALLOWED_HOSTS or "
                 f"ACCELO_MCP_ALLOWED_ORIGINS allow-list is set. A web page the "
                 f"permitted user visits in their browser could otherwise drive "
-                f"every tool through this server (advisory finding 2).\n"
+                f"every tool through this server (a DNS-rebinding attack).\n"
                 f"  - Preferred: set ACCELO_MCP_ALLOWED_HOSTS to the hostname(s) "
                 f"this server is reached through (and ACCELO_MCP_ALLOWED_ORIGINS "
                 f"for browser clients).\n"

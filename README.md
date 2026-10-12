@@ -66,13 +66,19 @@ Copy `.env.example` to `.env`, or provide these variables through the MCP host:
 
 HTTP transport variables (only used with `--http` or `--sse`):
 
+> **Single-user scope.** The HTTP / SSE transports have **no inbound
+> authentication** and act with one shared Accelo identity for every caller.
+> This server is for a single operator; when running over HTTP it is your
+> responsibility to ensure only the one intended user can reach it. See the
+> fuller note under [Usage](#usage) and [`SECURITY.md`](SECURITY.md).
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ACCELO_MCP_HOST` | `127.0.0.1` | Interface to bind. `127.0.0.1` keeps it local-only (recommended). Only set `0.0.0.0` inside a container, and publish the port to loopback on the host — see the single-user scope note above and [`SECURITY.md`](SECURITY.md). |
 | `ACCELO_MCP_PORT` | `3000` | TCP port to listen on. |
 | `ACCELO_MCP_PATH` | `/mcp` | Streamable HTTP endpoint path. |
 | `ACCELO_MCP_JSON_RESPONSE` | `false` | Return a single JSON response instead of an SSE stream. |
-| `ACCELO_MCP_STATELESS` | `false` | Run without per-session state so any node can serve any request (suits horizontally scaled deployments). |
+| `ACCELO_MCP_STATELESS` | `false` | Run without per-session MCP protocol state. This only affects the transport-level session the MCP library tracks; it does **not** add per-user credentials — every request still uses the one shared Accelo identity (see the single-user scope note above). |
 | `ACCELO_MCP_ALLOWED_HOSTS` | — | Comma-separated `Host` header allow-list for DNS-rebinding protection, e.g. your public hostname. Required when the server is reached through any hostname other than `localhost`. |
 | `ACCELO_MCP_ALLOWED_ORIGINS` | — | Comma-separated `Origin` header allow-list. |
 | `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION` | `false` | Disable the `Host`/`Origin` check entirely. Prefer setting the allow-lists above instead. |
@@ -132,27 +138,32 @@ active and does not reject proxied requests:
 ```bash
 # Publish the container port to loopback on the host, not to all interfaces:
 #   docker run -p 127.0.0.1:8080:8080 ...
+# The allow-list below assumes a host-side reverse proxy that forwards with
+# Host: mcp.internal.example; the 127.0.0.1:* / localhost:* entries keep a
+# direct loopback request working (a custom allow-list REPLACES the library's
+# loopback defaults, and matching is exact unless an entry ends in ":*").
 ACCELO_MCP_HOST=0.0.0.0 \
 ACCELO_MCP_PORT=8080 \
-ACCELO_MCP_ALLOWED_HOSTS=mcp.example.com \
-ACCELO_MCP_ALLOWED_ORIGINS=https://mcp.example.com \
+ACCELO_MCP_ALLOWED_HOSTS=mcp.internal.example,127.0.0.1:*,localhost:* \
+ACCELO_MCP_ALLOWED_ORIGINS=https://mcp.internal.example \
 ACCELO_MCP_ALLOW_UNAUTHENTICATED=true \
 accelo-mcp --http
 ```
 
 The server refuses to start on a non-loopback host unless you set
 `ACCELO_MCP_ALLOW_UNAUTHENTICATED=true`, acknowledging that it has no inbound
-authentication. This stops *accidental* exposure (an empty config or a copied
-example); it does not block an intended exposed bind — you opt in explicitly.
-Here `ACCELO_MCP_HOST=0.0.0.0` only binds all interfaces *inside* the container;
-the `-p 127.0.0.1:8080:8080` publish is what keeps it reachable only from the
-host. An IP restriction alone does not stop DNS-rebinding, so keep the Host/Origin
-allow-list set regardless.
+authentication. This stops *accidental* exposure (an empty `ACCELO_MCP_HOST=`
+value or a copied example); it does not block an intended exposed bind — you opt
+in explicitly. Here `ACCELO_MCP_HOST=0.0.0.0` only binds all interfaces *inside*
+the container; the `-p 127.0.0.1:8080:8080` publish is what keeps it reachable
+only from the host. An IP restriction alone does not stop DNS-rebinding, so keep
+the Host/Origin allow-list set regardless.
 
-Set `ACCELO_MCP_STATELESS=true` for horizontally scaled deployments where any
-instance may serve any request. Note this only distributes the MCP protocol
-session; it does not add per-user credentials — every instance still uses the
-same single Accelo identity.
+`ACCELO_MCP_STATELESS=true` runs the transport without per-session MCP protocol
+state. This only affects the protocol-level session the MCP library tracks for
+stream resumption; it does **not** add per-user credentials or make the server
+multi-user — every request still uses the same single Accelo identity, so the
+single-user scope in [`SECURITY.md`](SECURITY.md) still applies.
 
 The older **SSE** transport is still available but deprecated; prefer `--http`
 for new deployments:

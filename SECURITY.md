@@ -40,11 +40,16 @@ As a result:
 **Accidental exposure is refused at start-up.** Because binding beyond loopback
 with no inbound authentication is a deliberate decision, the server refuses to
 start on a non-loopback host unless you set `ACCELO_MCP_ALLOW_UNAUTHENTICATED=true`.
-This prevents an *accidental* exposed bind (an empty config, or a `0.0.0.0`
-example copied without thought); it does **not** prevent an *intended* one — an
-operator who genuinely wants an exposed bind, and has their own network controls,
-opts in explicitly with that variable and the server starts (logging a warning).
-Loopback binds (the default) need no opt-in.
+This prevents an *accidental* exposed bind (an empty `ACCELO_MCP_HOST=` value, or
+a `0.0.0.0` example copied without thought); it does **not** prevent an *intended*
+one — an operator who genuinely wants an exposed bind, and has their own network
+controls, opts in explicitly with that variable and the server starts (logging a
+warning). Loopback binds (the default) need no opt-in.
+
+When the opt-in is used but no `ACCELO_MCP_ALLOWED_HOSTS` /
+`ACCELO_MCP_ALLOWED_ORIGINS` allow-list is set, the server additionally logs a
+warning that DNS-rebinding protection is off, because an exposed bind with no
+allow-list leaves the permitted user's browser as an attack vector (see above).
 
 Running the HTTP transport reachable by parties other than the single intended
 user is outside the supported use of this project.

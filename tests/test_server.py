@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
-from accelo_mcp.server import HttpTransportSettings, select_transport
+from accelo_mcp import server as server_module
+from accelo_mcp.server import HttpTransportSettings, main, select_transport
 
 
 class TestSelectTransport:
@@ -169,3 +172,90 @@ class TestExposureGate:
     def test_optin_loaded_from_env(self, monkeypatch):
         monkeypatch.setenv("ACCELO_MCP_ALLOW_UNAUTHENTICATED", "true")
         assert HttpTransportSettings.from_env().allow_unauthenticated is True
+
+
+class TestRebindingGap:
+    def test_loopback_has_no_gap(self):
+        assert HttpTransportSettings(host="127.0.0.1").has_rebinding_gap() is False
+
+    def test_non_loopback_no_allow_list_has_gap(self):
+        settings = HttpTransportSettings(host="0.0.0.0", allow_unauthenticated=True)
+        assert settings.has_rebinding_gap() is True
+
+    def test_non_loopback_with_allow_hosts_has_no_gap(self):
+        settings = HttpTransportSettings(
+            host="0.0.0.0",
+            allow_unauthenticated=True,
+            allowed_hosts=["mcp.example.com"],
+        )
+        assert settings.has_rebinding_gap() is False
+
+    def test_non_loopback_protection_disabled_has_no_gap(self):
+        # Operator explicitly turned the check off — a deliberate choice, not a gap.
+        settings = HttpTransportSettings(
+            host="0.0.0.0",
+            allow_unauthenticated=True,
+            disable_dns_rebinding_protection=True,
+        )
+        assert settings.has_rebinding_gap() is False
+
+    def test_warns_on_empty_allow_list_when_opted_in(self, caplog):
+        settings = HttpTransportSettings(host="0.0.0.0", allow_unauthenticated=True)
+        with caplog.at_level("WARNING"):
+            settings.enforce_startup_safety("Streamable HTTP")
+        assert any("DNS-rebinding protection is OFF" in r.message for r in caplog.records)
+
+    def test_no_rebinding_warning_when_allow_list_set(self, caplog):
+        settings = HttpTransportSettings(
+            host="0.0.0.0",
+            allow_unauthenticated=True,
+            allowed_hosts=["mcp.example.com"],
+        )
+        with caplog.at_level("WARNING"):
+            settings.enforce_startup_safety("Streamable HTTP")
+        assert not any("DNS-rebinding protection is OFF" in r.message for r in caplog.records)
+
+
+class TestEnforceStartupSafety:
+    def test_refuses_non_loopback_without_optin(self):
+        settings = HttpTransportSettings(host="0.0.0.0")
+        with pytest.raises(RuntimeError, match="Refusing to start"):
+            settings.enforce_startup_safety("Streamable HTTP")
+
+    def test_loopback_is_quiet(self, caplog):
+        settings = HttpTransportSettings(host="127.0.0.1")
+        with caplog.at_level("WARNING"):
+            settings.enforce_startup_safety("Streamable HTTP")
+        assert caplog.records == []
+
+
+class TestMainRefusesBeforeAuth:
+    """The exposure gate must run before create_server() on both HTTP paths.
+
+    Pins the "refuse before auth" ordering: an accidental 0.0.0.0 bind must be
+    rejected without ever constructing the server (which would trigger an
+    interactive auth flow / network calls). create_server is monkeypatched to
+    fail loudly if it is reached.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_env(self, monkeypatch):
+        for var in (
+            "ACCELO_MCP_HOST",
+            "ACCELO_MCP_ALLOW_UNAUTHENTICATED",
+            "ACCELO_MCP_ALLOWED_HOSTS",
+            "ACCELO_MCP_ALLOWED_ORIGINS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def _boom(self, *args, **kwargs):
+        raise AssertionError("create_server() must not be reached when the bind is refused")
+
+    @pytest.mark.parametrize("flag", ["--http", "--sse"])
+    def test_main_refuses_exposed_bind_before_create_server(self, monkeypatch, flag):
+        monkeypatch.setenv("ACCELO_MCP_HOST", "0.0.0.0")
+        monkeypatch.setattr(server_module, "create_server", self._boom)
+        monkeypatch.setattr(sys, "argv", ["accelo-mcp", flag])
+
+        with pytest.raises(RuntimeError, match="Refusing to start"):
+            main()

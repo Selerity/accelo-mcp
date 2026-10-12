@@ -187,8 +187,8 @@ class HttpTransportSettings:
         controls and genuinely intends it — so it is NOT forbidden. It must only
         be *deliberate*: starting on a non-loopback host requires the operator to
         set ``ACCELO_MCP_ALLOW_UNAUTHENTICATED=true``. The check exists solely to
-        stop the accidental exposure (an empty config or a copied ``0.0.0.0``
-        example), never to block an intended deployment.
+        stop the accidental exposure (an empty ``ACCELO_MCP_HOST=`` value or a
+        copied ``0.0.0.0`` example), never to block an intended deployment.
 
         Raises:
             RuntimeError: if bound to a non-loopback host without the opt-in.
@@ -206,6 +206,58 @@ class HttpTransportSettings:
             f"explicitly with ACCELO_MCP_ALLOW_UNAUTHENTICATED=true.\n"
             f"See SECURITY.md for the single-user deployment model."
         )
+
+    def has_rebinding_gap(self) -> bool:
+        """Whether DNS-rebinding protection is effectively off on an exposed bind.
+
+        The gap exists when the bind is non-loopback, the protection has not been
+        explicitly disabled, and no Host/Origin allow-list is set — because in
+        that case :meth:`transport_security` returns ``None`` and the MCP library
+        falls back to running with rebinding protection disabled. On a loopback
+        bind this is harmless (the library's localhost defaults apply), so it is
+        only a concern once the server is reachable beyond the local machine.
+        """
+        return (
+            not self.is_loopback_bind()
+            and not self.disable_dns_rebinding_protection
+            and self.allowed_hosts is None
+            and self.allowed_origins is None
+        )
+
+    def enforce_startup_safety(self, transport_label: str) -> None:
+        """Run the HTTP/SSE start-up safety checks for ``transport_label``.
+
+        Single home for the behaviour both transports share: refuse an accidental
+        unauthenticated non-loopback bind, then — when an exposed bind is allowed
+        — warn that the transport is unauthenticated and, separately, warn if
+        DNS-rebinding protection is effectively off (no allow-list set).
+
+        Raises:
+            RuntimeError: if bound to a non-loopback host without the opt-in.
+        """
+        self.check_exposure_allowed()
+
+        if not self.is_loopback_bind():
+            logger.warning(
+                "Accelo MCP %s transport is bound to a non-loopback host (%s) "
+                "with NO inbound authentication (ACCELO_MCP_ALLOW_UNAUTHENTICATED "
+                "is set). Every caller that reaches this port acts with the "
+                "server's full Accelo identity. Ensure your own network controls "
+                "restrict access to the single intended user. See SECURITY.md.",
+                transport_label,
+                self.host,
+            )
+
+        if self.has_rebinding_gap():
+            logger.warning(
+                "DNS-rebinding protection is OFF for the %s transport: it is "
+                "bound to a non-loopback host with no ACCELO_MCP_ALLOWED_HOSTS / "
+                "ACCELO_MCP_ALLOWED_ORIGINS allow-list. A malicious web page the "
+                "permitted user visits could drive the server through their "
+                "browser. Set the Host/Origin allow-list (preferred) to close "
+                "this. See SECURITY.md.",
+                transport_label,
+            )
 
 
 async def run_stdio() -> None:
@@ -277,16 +329,7 @@ def main() -> None:
 
     if transport == "http":
         settings = HttpTransportSettings.from_env()
-        settings.check_exposure_allowed()
-        if not settings.is_loopback_bind():
-            logger.warning(
-                "Accelo MCP HTTP transport is bound to a non-loopback host (%s) "
-                "with NO inbound authentication (ACCELO_MCP_ALLOW_UNAUTHENTICATED "
-                "is set). Every caller that reaches this port acts with the "
-                "server's full Accelo identity. Ensure your own network controls "
-                "restrict access to the single intended user. See SECURITY.md.",
-                settings.host,
-            )
+        settings.enforce_startup_safety("Streamable HTTP")
         logger.info(
             "Starting Accelo MCP server (Streamable HTTP on %s:%d%s, "
             "stateless=%s, json_response=%s)",
@@ -299,16 +342,7 @@ def main() -> None:
         asyncio.run(run_streamable_http(settings))
     elif transport == "sse":
         settings = HttpTransportSettings.from_env()
-        settings.check_exposure_allowed()
-        if not settings.is_loopback_bind():
-            logger.warning(
-                "Accelo MCP SSE transport is bound to a non-loopback host (%s) "
-                "with NO inbound authentication (ACCELO_MCP_ALLOW_UNAUTHENTICATED "
-                "is set). Every caller that reaches this port acts with the "
-                "server's full Accelo identity. Ensure your own network controls "
-                "restrict access to the single intended user. See SECURITY.md.",
-                settings.host,
-            )
+        settings.enforce_startup_safety("SSE")
         logger.warning(
             "The SSE transport is deprecated; prefer --http (Streamable HTTP). "
             "Starting Accelo MCP server (SSE on %s:%d)",

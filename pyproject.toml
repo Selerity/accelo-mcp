@@ -1,6 +1,6 @@
 [project]
 name = "accelo-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Unofficial MCP server for the Accelo CRM platform"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,6 +12,10 @@ dependencies = [
     "pydantic~=2.13",
     "click~=8.4",
     "uvicorn~=0.52",
+    # Security floor for a transitive dependency of mcp (pyjwt[crypto]>=2.10.1):
+    # pyjwt < 2.15.0 is affected by PYSEC-2026-4183. Remove once mcp's own floor
+    # moves past it.
+    "pyjwt[crypto]>=2.15.0",
 ]
 
 [project.optional-dependencies]

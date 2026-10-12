@@ -108,7 +108,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes
+        run: |
+          # Use version-specific hand-written notes when present (e.g. a release
+          # that needs migration steps or a security banner), otherwise fall back
+          # to GitHub's auto-generated "What's Changed" list. The notes file is
+          # keyed on the version (release-notes/v${VERSION}.md) so it only ever
+          # applies to its own release and cannot leak into a later one.
+          NOTES_FILE="release-notes/v${VERSION}.md"
+          if [ -f "${NOTES_FILE}" ]; then
+            gh release create "v${VERSION}" --title "v${VERSION}" --notes-file "${NOTES_FILE}"
+          else
+            gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes
+          fi
 
   publish:
     needs: release

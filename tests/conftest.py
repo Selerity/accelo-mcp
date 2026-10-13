@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import pytest
 
+from accelo_mcp import auth as auth_module
 from accelo_mcp.config import AcceloConfig
+
+
+@pytest.fixture(autouse=True)
+def isolated_token_file(tmp_path, monkeypatch):
+    """Point token storage at a temp directory so tests never touch ~/.accelo-mcp."""
+    token_dir = tmp_path / ".accelo-mcp"
+    monkeypatch.setattr(auth_module, "TOKEN_DIR", token_dir)
+    monkeypatch.setattr(auth_module, "TOKEN_FILE", token_dir / "tokens.json")
 
 
 @pytest.fixture

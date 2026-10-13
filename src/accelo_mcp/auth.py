@@ -6,7 +6,9 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import secrets
+import tempfile
 import threading
 import time
 import webbrowser
@@ -439,6 +441,9 @@ class AuthManager:
             raise AuthError(f"Token refresh failed ({response.status_code}): {response.text}")
 
         result = response.json()
+        # Keep the current refresh token when the response does not issue a new one
+        if not result.get("refresh_token"):
+            result["refresh_token"] = self._refresh_token
         self._set_token(result)
         logger.info("Token refreshed successfully")
 
@@ -465,10 +470,36 @@ class AuthManager:
                 "expires_at": self._expires_at,
             }
 
-            TOKEN_FILE.write_text(json.dumps(token_data, indent=2))
-            TOKEN_FILE.chmod(0o600)
-            logger.debug("Tokens persisted to %s", TOKEN_FILE)
-        except OSError as e:
+            # Write to a temp file and rename it over the old one, so readers never
+            # see a partial file. mkstemp creates the file 0600, which keeps the
+            # tokens private without a separate chmod. Resolve first so a
+            # symlinked token file is updated at its target, not replaced.
+            target = TOKEN_FILE.resolve()
+            fd, tmp_path = tempfile.mkstemp(dir=target.parent, prefix=".tokens-", suffix=".tmp")
+            os.close(fd)
+            try:
+                with open(tmp_path, "w") as f:
+                    json.dump(token_data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, target)
+            except BaseException:
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+            if os.name == "posix":
+                # Best effort: ask the OS to flush the rename to disk. The new file
+                # is already in place, so a failure here is not a failed persist.
+                try:
+                    dir_fd = os.open(target.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except OSError as e:
+                    logger.debug("Could not fsync %s: %s", target.parent, e)
+            logger.debug("Tokens persisted to %s", target)
+        except (OSError, RuntimeError) as e:
+            # RuntimeError: Path.resolve() raises it for a symlink loop on Python 3.12
             logger.warning("Failed to persist tokens: %s", e)
 
     def _load_cached_tokens(self):

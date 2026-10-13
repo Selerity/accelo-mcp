@@ -476,8 +476,8 @@ class AuthManager:
             # symlinked token file is updated at its target, not replaced.
             target = TOKEN_FILE.resolve()
             fd, tmp_path = tempfile.mkstemp(dir=target.parent, prefix=".tokens-", suffix=".tmp")
-            os.close(fd)
             try:
+                os.close(fd)
                 with open(tmp_path, "w") as f:
                     json.dump(token_data, f, indent=2)
                     f.flush()

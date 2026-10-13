@@ -393,6 +393,26 @@ class TestTokenPersistence:
         assert json.loads(token_file.read_text())["access_token"] == "new"
         assert "Failed to persist tokens" not in caplog.text
 
+    @pytest.mark.asyncio
+    async def test_failed_close_removes_temp_file(self, mock_config, caplog):
+        """If closing the temp file descriptor fails, the temp file is still removed."""
+        token_file = auth_module.TOKEN_FILE
+        real_close = os.close
+
+        def failing_close(fd):
+            # Close for real so the test does not leak the descriptor, then fail
+            real_close(fd)
+            raise OSError("EIO")
+
+        auth = AuthManager(mock_config)
+        with patch.object(os, "close", side_effect=failing_close):
+            auth._set_token({"access_token": "new", "expires_in": 3600})
+        await auth.close()
+
+        assert not token_file.exists()
+        assert list(token_file.parent.glob(".tokens-*.tmp")) == []
+        assert "Failed to persist tokens: EIO" in caplog.text
+
 
 class TestPKCEFlow:
     """Tests for public application (PKCE) flow."""

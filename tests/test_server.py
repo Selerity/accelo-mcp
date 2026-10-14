@@ -549,6 +549,7 @@ class TestMainStartupLog:
 class TestRunTransports:
     """Pins the kwargs each transport passes to the MCP library."""
 
+    @pytest.mark.asyncio
     async def test_streamable_http_passes_full_kwargs(self, monkeypatch):
         mock_run = AsyncMock()
         monkeypatch.setattr(server_module.MCPServer, "run_streamable_http_async", mock_run)
@@ -580,6 +581,7 @@ class TestRunTransports:
             is ts.enable_dns_rebinding_protection
         )
 
+    @pytest.mark.asyncio
     async def test_sse_passes_security_only(self, monkeypatch):
         mock_run = AsyncMock()
         monkeypatch.setattr(server_module.MCPServer, "run_sse_async", mock_run)

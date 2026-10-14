@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -62,6 +63,10 @@ class AuthManager:
         self._token: str | None = None
         self._refresh_token: str | None = None
         self._expires_at: float = 0
+        # Serialises the refresh/acquire path (issue #15). Created lazily on first
+        # use inside the async get_token() so it binds to the running event loop,
+        # not at import or construction time (which may run before a loop exists).
+        self._refresh_lock: asyncio.Lock | None = None
         self._http = httpx.AsyncClient(timeout=30.0)
         self._load_cached_tokens()
 
@@ -90,7 +95,6 @@ class AuthManager:
         Raises AuthError if the callback carries an error or times out.
         """
         result: dict[str, str | None] = {"code": None, "error": None}
-        server_ready = threading.Event()
         code_received = threading.Event()
 
         class _CallbackHandler(BaseHTTPRequestHandler):
@@ -128,32 +132,44 @@ class AuthManager:
             def log_message(self, format, *args):  # noqa: A002
                 """Suppress default request logging."""
 
-        def _serve():
+        # Bind in the calling thread so a bind failure (e.g. the port is still held
+        # by a previous login) surfaces here as an AuthError instead of being lost
+        # in the worker thread and leaving the caller to hang (issue #14).
+        try:
             server = HTTPServer(("127.0.0.1", port), _CallbackHandler)
-            server.timeout = 1.0
-            server_ready.set()
-            while not code_received.is_set():
-                server.handle_request()
-            server.server_close()
+        except OSError as e:
+            raise AuthError(
+                f"Could not bind callback listener on 127.0.0.1:{port}: {e}. "
+                f"A previous login may still hold the port, or another process is using it."
+            ) from e
+
+        def _serve():
+            server.serve_forever(poll_interval=0.5)
 
         server_thread = threading.Thread(target=_serve, daemon=True)
         server_thread.start()
-        server_ready.wait()
 
-        # Block until code received or timeout
-        if not code_received.wait(timeout=timeout):
-            raise AuthError(
-                f"Timed out waiting for authorization callback on port {port} "
-                f"(waited {timeout:.0f}s)"
-            )
+        # Block until code received or timeout, then tear the listener down on every
+        # exit path so the redirect port is freed for a retry and a late callback
+        # cannot be served (and so falsely report success) after we stop waiting.
+        try:
+            if not code_received.wait(timeout=timeout):
+                raise AuthError(
+                    f"Timed out waiting for authorization callback on port {port} "
+                    f"(waited {timeout:.0f}s)"
+                )
 
-        if result["error"]:
-            raise AuthError(f"Authorization denied: {result['error']}")
+            if result["error"]:
+                raise AuthError(f"Authorization denied: {result['error']}")
 
-        if not result["code"]:
-            raise AuthError("No authorization code received in callback")
+            if not result["code"]:
+                raise AuthError("No authorization code received in callback")
 
-        return result["code"]
+            return result["code"]
+        finally:
+            server.shutdown()  # thread-safe stop of serve_forever
+            server.server_close()  # release the socket / free the port
+            server_thread.join(timeout=5.0)
 
     def _port_from_redirect_uri(self) -> int:
         """Extract the port number from the configured redirect URI.
@@ -166,20 +182,38 @@ class AuthManager:
         parsed = urlparse(self.config.redirect_uri)
         return parsed.port or 8080
 
+    def _get_refresh_lock(self) -> asyncio.Lock:
+        """Return the refresh lock, creating it lazily under the running loop.
+
+        Only ever called from within get_token() (under a running event loop), so
+        the lock binds to the correct loop and no locking is needed around the
+        idempotent lazy init.
+        """
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
+        return self._refresh_lock
+
     async def get_token(self) -> str:
         """Returns a valid Bearer token, refreshing/acquiring as needed."""
         if self._is_valid():
             return self._token  # type: ignore
 
-        if self._refresh_token and self.config.auth_type != "service":
-            try:
-                await self._refresh_token_flow()
+        # Serialise refresh/acquire so concurrent callers trigger exactly one
+        # network request; the re-check collapses the waiters onto the winner's
+        # freshly stored token (issue #15).
+        async with self._get_refresh_lock():
+            if self._is_valid():
                 return self._token  # type: ignore
-            except AuthError:
-                logger.warning("Token refresh failed, re-authenticating")
 
-        await self._acquire_token()
-        return self._token  # type: ignore
+            if self._refresh_token and self.config.auth_type != "service":
+                try:
+                    await self._refresh_token_flow()
+                    return self._token  # type: ignore
+                except AuthError:
+                    logger.warning("Token refresh failed, re-authenticating")
+
+            await self._acquire_token()
+            return self._token  # type: ignore
 
     async def close(self):
         """Close the HTTP client."""
@@ -258,7 +292,9 @@ class AuthManager:
         )
 
         webbrowser.open(auth_url)
-        code = self._wait_for_callback(redirect_port)
+        # Dispatch the blocking callback wait off the event loop so other MCP
+        # requests keep being served while we wait for the browser (issue #14).
+        code = await asyncio.to_thread(self._wait_for_callback, redirect_port)
 
         await self._exchange_code(code, self.config.redirect_uri)
         logger.info("Acquired token via web authorization flow")
@@ -313,6 +349,14 @@ class AuthManager:
                 "A PIN has been sent to an admin of your Accelo deployment.\n"
                 "Enter the PIN below to complete authorization:\n",
                 file=sys.stderr,
+            )
+
+        if not sys.stdin.isatty():
+            raise AuthError(
+                "Installed-application login needs an interactive terminal to read the "
+                "approval PIN, but stdin is not a TTY (it is the MCP protocol stream on the "
+                "stdio transport). Complete the login in a terminal, or use a 'service' "
+                "auth type for unattended operation."
             )
 
         pin = input("PIN: ").strip()
@@ -372,7 +416,9 @@ class AuthManager:
         )
 
         webbrowser.open(auth_url)
-        code = self._wait_for_callback(redirect_port)
+        # Dispatch the blocking callback wait off the event loop so other MCP
+        # requests keep being served while we wait for the browser (issue #14).
+        code = await asyncio.to_thread(self._wait_for_callback, redirect_port)
 
         await self._exchange_code_pkce(code, code_verifier)
         logger.info("Acquired token via PKCE authorization flow")
@@ -431,9 +477,12 @@ class AuthManager:
         if not self._refresh_token:
             raise AuthError("No refresh token available")
 
+        # Capture the token actually sent so we only clear/carry over against it,
+        # never clobbering a newer token another caller may have stored (issue #15).
+        sent_refresh_token = self._refresh_token
         data: dict[str, str] = {
             "grant_type": "refresh_token",
-            "refresh_token": self._refresh_token,
+            "refresh_token": sent_refresh_token,
         }
 
         if self.config.auth_type == "public":
@@ -461,15 +510,17 @@ class AuthManager:
                 error = response.json().get("error")
             except (json.JSONDecodeError, ValueError):
                 error = None
-            if error == "invalid_grant":
+            # Only clear when the token is terminally dead AND still the one we
+            # sent, so a newer token stored meanwhile is never dropped.
+            if error == "invalid_grant" and self._refresh_token == sent_refresh_token:
                 self._refresh_token = None
                 self._persist_tokens()
             raise AuthError(f"Token refresh failed ({response.status_code}): {response.text}")
 
         result = response.json()
-        # Keep the current refresh token when the response does not issue a new one
+        # Keep the refresh token we sent when the response does not issue a new one
         if not result.get("refresh_token"):
-            result["refresh_token"] = self._refresh_token
+            result["refresh_token"] = sent_refresh_token
         self._set_token(result)
         logger.info("Token refreshed successfully")
 

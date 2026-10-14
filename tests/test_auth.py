@@ -3,25 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 import pytest
 import respx
 
-from accelo_mcp.auth import TOKEN_FILE, AuthError, AuthManager
+from accelo_mcp import auth as auth_module
+from accelo_mcp.auth import AuthError, AuthManager
 from accelo_mcp.config import AcceloConfig
-
-
-@pytest.fixture(autouse=True)
-def clean_token_file():
-    """Remove token file before and after each test."""
-    if TOKEN_FILE.exists():
-        TOKEN_FILE.unlink()
-    yield
-    if TOKEN_FILE.exists():
-        TOKEN_FILE.unlink()
 
 
 class TestServiceFlow:
@@ -142,6 +135,49 @@ class TestRefreshFlow:
 
     @respx.mock
     @pytest.mark.asyncio
+    async def test_keeps_refresh_token_when_response_omits_it(self, mock_web_config):
+        """A refresh response without refresh_token keeps the existing one."""
+        respx.post(f"{mock_web_config.oauth2_url}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "refreshed-token", "expires_in": 3600},
+            )
+        )
+
+        auth = AuthManager(mock_web_config)
+        auth._token = "old-token"
+        auth._refresh_token = "old-refresh"
+        auth._expires_at = time.time() - 100  # expired
+
+        token = await auth.get_token()
+        await auth.close()
+
+        assert token == "refreshed-token"
+        assert auth._refresh_token == "old-refresh"
+        assert json.loads(auth_module.TOKEN_FILE.read_text())["refresh_token"] == "old-refresh"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_fresh_grant_does_not_carry_over_refresh_token(self, mock_config):
+        """A new grant without refresh_token clears any previously stored one."""
+        respx.post(f"{mock_config.oauth2_url}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "service-token", "expires_in": 3600},
+            )
+        )
+
+        auth = AuthManager(mock_config)
+        auth._refresh_token = "stale-web-refresh"
+        auth._expires_at = 0
+        await auth.get_token()
+        await auth.close()
+
+        assert auth._refresh_token is None
+        assert json.loads(auth_module.TOKEN_FILE.read_text())["refresh_token"] is None
+
+    @respx.mock
+    @pytest.mark.asyncio
     async def test_refresh_failure_triggers_reauth(self, mock_web_config):
         """Falls back to full reauth when refresh fails."""
         # First call: refresh fails
@@ -179,6 +215,52 @@ class TestRefreshFlow:
 
         assert token == "new-token"
 
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_chained_refresh_reuses_original_refresh_token(self, mock_web_config):
+        """Across two refreshes where the first omits refresh_token, the second
+        request still sends the originally stored refresh token."""
+        import urllib.parse
+
+        captured_requests = []
+
+        def side_effect(request):
+            captured_requests.append(request)
+            # First refresh omits refresh_token; second issues a new one.
+            if len(captured_requests) == 1:
+                return httpx.Response(
+                    200,
+                    json={"access_token": "access-1", "expires_in": 3600},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "access-2",
+                    "refresh_token": "new-refresh",
+                    "expires_in": 3600,
+                },
+            )
+
+        respx.post(f"{mock_web_config.oauth2_url}/token").mock(side_effect=side_effect)
+
+        auth = AuthManager(mock_web_config)
+        auth._token = "old-token"
+        auth._refresh_token = "original-refresh"
+        auth._expires_at = time.time() - 100  # expired
+
+        token1 = await auth.get_token()
+        assert token1 == "access-1"
+
+        # Force a second refresh.
+        auth._expires_at = time.time() - 100
+        token2 = await auth.get_token()
+        assert token2 == "access-2"
+        await auth.close()
+
+        assert len(captured_requests) == 2
+        second_body = urllib.parse.parse_qs(captured_requests[1].content.decode())
+        assert second_body["refresh_token"] == ["original-refresh"]
+
 
 class TestTokenPersistence:
     """Tests for token persistence to disk."""
@@ -201,8 +283,8 @@ class TestTokenPersistence:
         await auth.get_token()
         await auth.close()
 
-        assert TOKEN_FILE.exists()
-        data = json.loads(TOKEN_FILE.read_text())
+        assert auth_module.TOKEN_FILE.exists()
+        data = json.loads(auth_module.TOKEN_FILE.read_text())
         assert data["access_token"] == "persisted-token"
         assert data["deployment"] == "test-deployment"
 
@@ -211,8 +293,8 @@ class TestTokenPersistence:
     async def test_loads_cached_tokens(self, mock_config):
         """Loads valid cached tokens on startup."""
         # Pre-write token file
-        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(
+        auth_module.TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        auth_module.TOKEN_FILE.write_text(
             json.dumps(
                 {
                     "deployment": "test-deployment",
@@ -233,8 +315,8 @@ class TestTokenPersistence:
     @pytest.mark.asyncio
     async def test_ignores_different_deployment(self, mock_config):
         """Ignores cached tokens from a different deployment."""
-        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(
+        auth_module.TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        auth_module.TOKEN_FILE.write_text(
             json.dumps(
                 {
                     "deployment": "other-deployment",
@@ -272,9 +354,93 @@ class TestTokenPersistence:
         await auth.get_token()
         await auth.close()
 
-        assert TOKEN_FILE.exists()
-        mode = TOKEN_FILE.stat().st_mode & 0o777
+        assert auth_module.TOKEN_FILE.exists()
+        mode = auth_module.TOKEN_FILE.stat().st_mode & 0o777
         assert mode == 0o600
+
+    @pytest.mark.asyncio
+    async def test_failed_write_keeps_existing_token_file(self, mock_config, caplog):
+        """A write that fails part-way leaves the previous token file intact."""
+        token_file = auth_module.TOKEN_FILE
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        original = json.dumps({"deployment": "test-deployment", "access_token": "old"})
+        token_file.write_text(original)
+        before = set(token_file.parent.iterdir())
+
+        auth = AuthManager(mock_config)
+        with patch.object(os, "replace", side_effect=OSError("disk full")):
+            auth._set_token({"access_token": "new", "expires_in": 3600})
+        await auth.close()
+
+        assert token_file.read_text() == original
+        assert set(token_file.parent.iterdir()) == before
+        assert "Failed to persist tokens: disk full" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_rewrite_tightens_existing_file_permissions(self, mock_config):
+        """Rewriting a pre-existing 0644 token file leaves it 0600."""
+        token_file = auth_module.TOKEN_FILE
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text("{}")
+        token_file.chmod(0o644)
+
+        auth = AuthManager(mock_config)
+        auth._set_token({"access_token": "new", "expires_in": 3600})
+        await auth.close()
+
+        assert token_file.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.asyncio
+    async def test_symlinked_token_file_is_written_through(self, mock_config, tmp_path):
+        """A symlinked token file stays a symlink and its target is updated."""
+        target = tmp_path / "elsewhere" / "tokens.json"
+        target.parent.mkdir()
+        target.write_text("{}")
+        token_file = auth_module.TOKEN_FILE
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.symlink_to(target)
+
+        auth = AuthManager(mock_config)
+        auth._set_token({"access_token": "new", "expires_in": 3600})
+        await auth.close()
+
+        assert token_file.is_symlink()
+        assert json.loads(target.read_text())["access_token"] == "new"
+        assert list(target.parent.glob(".tokens-*.tmp")) == []
+
+    @pytest.mark.asyncio
+    async def test_symlink_loop_does_not_raise(self, mock_config, caplog):
+        """A path that cannot be resolved (e.g. symlink loop) fails soft with a warning.
+
+        Path.resolve() only raises RuntimeError for symlink loops on Python 3.12+,
+        so patch it directly to exercise the fail-soft handler on any interpreter.
+        """
+        auth = AuthManager(mock_config)
+        with patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")):
+            auth._set_token({"access_token": "new", "expires_in": 3600})
+        await auth.close()
+
+        assert auth._token == "new"
+        assert "Failed to persist tokens" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_directory_fsync_failure_is_not_a_failed_persist(self, mock_config, caplog):
+        """If only the directory fsync fails, the new file is kept and no warning is logged."""
+        token_file = auth_module.TOKEN_FILE
+        real_open = os.open
+
+        def open_failing_on_dirs(path, flags, *args, **kwargs):
+            if os.path.isdir(path):
+                raise OSError("EINVAL")
+            return real_open(path, flags, *args, **kwargs)
+
+        auth = AuthManager(mock_config)
+        with patch.object(os, "open", side_effect=open_failing_on_dirs):
+            auth._set_token({"access_token": "new", "expires_in": 3600})
+        await auth.close()
+
+        assert json.loads(token_file.read_text())["access_token"] == "new"
+        assert "Failed to persist tokens" not in caplog.text
 
 
 class TestPKCEFlow:

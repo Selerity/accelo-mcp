@@ -6,7 +6,9 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import secrets
+import tempfile
 import threading
 import time
 import webbrowser
@@ -23,6 +25,22 @@ logger = logging.getLogger(__name__)
 
 TOKEN_DIR = Path.home() / ".accelo-mcp"
 TOKEN_FILE = TOKEN_DIR / "tokens.json"
+
+
+def _token_dir() -> Path:
+    """Return the token directory, resolved at call time.
+
+    Reads the module global so tests can monkeypatch TOKEN_DIR for isolation.
+    """
+    return TOKEN_DIR
+
+
+def _token_file() -> Path:
+    """Return the token file path, resolved at call time.
+
+    Reads the module global so tests can monkeypatch TOKEN_FILE for isolation.
+    """
+    return TOKEN_FILE
 
 
 class AuthError(Exception):
@@ -435,10 +453,23 @@ class AuthManager:
         )
 
         if response.status_code != 200:
-            self._refresh_token = None
+            # Only a terminal invalid_grant means the refresh token is dead;
+            # drop it (in memory and on disk) so the next call reauthenticates.
+            # Transport/server errors and non-JSON bodies are non-terminal, so
+            # the refresh token is kept for a later retry.
+            try:
+                error = response.json().get("error")
+            except (json.JSONDecodeError, ValueError):
+                error = None
+            if error == "invalid_grant":
+                self._refresh_token = None
+                self._persist_tokens()
             raise AuthError(f"Token refresh failed ({response.status_code}): {response.text}")
 
         result = response.json()
+        # Keep the current refresh token when the response does not issue a new one
+        if not result.get("refresh_token"):
+            result["refresh_token"] = self._refresh_token
         self._set_token(result)
         logger.info("Token refreshed successfully")
 
@@ -453,10 +484,38 @@ class AuthManager:
         self._persist_tokens()
 
     def _persist_tokens(self):
-        """Save tokens to disk with secure permissions."""
+        """Save tokens to disk with secure permissions.
+
+        Writes atomically via a temp file in the resolved target directory,
+        fsyncs the file and the directory, then renames it over the old file so
+        readers never see a partial write. The default token directory is
+        created 0700; a WARNING is logged (but the write proceeds) when the
+        resolved directory is group/world-writable. Orphaned temp files from a
+        previous interrupted write are swept first. Failures are logged and
+        swallowed so a persist error never crashes the caller.
+        """
+        # Path.resolve() raises RuntimeError for a symlink loop (Python 3.12+);
+        # resolve first so a symlinked token file is updated at its target, not
+        # replaced, and fail soft if the path cannot be resolved.
         try:
-            TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-            TOKEN_DIR.chmod(0o700)
+            target = _token_file().resolve()
+        except RuntimeError as e:
+            logger.warning("Failed to persist tokens: %s", e)
+            return
+
+        try:
+            token_dir = _token_dir()
+            token_dir.mkdir(parents=True, exist_ok=True)
+            token_dir.chmod(0o700)
+
+            # Warn (do not refuse) if the resolved write directory is readable
+            # beyond the owner — the tokens could be exposed to other users.
+            parent = target.parent
+            if os.stat(parent).st_mode & 0o022:
+                logger.warning(
+                    "Token directory %s is writable by group/other; tokens may be exposed",
+                    parent,
+                )
 
             token_data = {
                 "deployment": self.config.deployment,
@@ -465,19 +524,52 @@ class AuthManager:
                 "expires_at": self._expires_at,
             }
 
-            TOKEN_FILE.write_text(json.dumps(token_data, indent=2))
-            TOKEN_FILE.chmod(0o600)
-            logger.debug("Tokens persisted to %s", TOKEN_FILE)
+            # Sweep orphaned temp files left by a previously interrupted write.
+            for stale in parent.glob(".tokens-*.tmp"):
+                try:
+                    stale.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            # Write to a temp file and rename it over the old one, so readers never
+            # see a partial file. mkstemp creates the file 0600, which keeps the
+            # tokens private without a separate chmod.
+            fd, tmp_path = tempfile.mkstemp(dir=parent, prefix=".tokens-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(token_data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, target)
+            except BaseException:
+                # Covers OSError and async cancellation: never leave a temp file behind.
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+            if os.name == "posix":
+                # Directory fsync is POSIX-only; non-POSIX platforms rely on
+                # best-effort OS flushing (Windows is not a supported platform).
+                # The new file is already in place, so a failure here is not a
+                # failed persist.
+                try:
+                    dir_fd = os.open(parent, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except OSError as e:
+                    logger.debug("Could not fsync %s: %s", parent, e)
+            logger.debug("Tokens persisted to %s", target)
         except OSError as e:
             logger.warning("Failed to persist tokens: %s", e)
 
     def _load_cached_tokens(self):
         """Load previously persisted tokens if they exist and match deployment."""
         try:
-            if not TOKEN_FILE.exists():
+            token_file = _token_file()
+            if not token_file.exists():
                 return
 
-            data = json.loads(TOKEN_FILE.read_text())
+            data = json.loads(token_file.read_text())
             if data.get("deployment") != self.config.deployment:
                 logger.debug("Cached tokens are for different deployment, ignoring")
                 return

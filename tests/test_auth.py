@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -15,6 +16,20 @@ import respx
 from accelo_mcp import auth as auth_module
 from accelo_mcp.auth import AuthError, AuthManager
 from accelo_mcp.config import AcceloConfig
+
+
+def _free_port() -> int:
+    """Return a free ephemeral port, chosen atomically by the OS.
+
+    Binds to port 0 so the kernel hands back an unused port, reads it back, then
+    closes the socket. This avoids the flakiness of hardcoded ports that another
+    process (or a previous test) may already hold.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 class TestServiceFlow:
@@ -616,12 +631,13 @@ class TestCallbackListener:
         import urllib.request
 
         auth = AuthManager(mock_web_config)
+        port = _free_port()
 
         # Start the listener in a thread (simulating the real flow)
         result = {}
 
         def run_listener():
-            result["code"] = auth._wait_for_callback(19876, timeout=5.0)
+            result["code"] = auth._wait_for_callback(port, timeout=5.0)
 
         listener_thread = threading.Thread(target=run_listener)
         listener_thread.start()
@@ -632,7 +648,7 @@ class TestCallbackListener:
         time.sleep(0.2)
 
         # Simulate Accelo redirecting back with a code
-        urllib.request.urlopen("http://127.0.0.1:19876/callback?code=test-auth-code-xyz")
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/callback?code=test-auth-code-xyz")
 
         listener_thread.join(timeout=5.0)
         await auth.close()
@@ -647,11 +663,12 @@ class TestCallbackListener:
         import urllib.request
 
         auth = AuthManager(mock_web_config)
+        port = _free_port()
         result = {"error": None}
 
         def run_listener():
             try:
-                auth._wait_for_callback(19877, timeout=5.0)
+                auth._wait_for_callback(port, timeout=5.0)
             except AuthError as e:
                 result["error"] = str(e)
 
@@ -664,7 +681,8 @@ class TestCallbackListener:
 
         try:
             urllib.request.urlopen(
-                "http://127.0.0.1:19877/callback?error=access_denied&error_description=User+denied"
+                f"http://127.0.0.1:{port}/callback"
+                "?error=access_denied&error_description=User+denied"
             )
         except urllib.error.HTTPError:
             pass  # Expected — server returns 400 for error callbacks
@@ -676,11 +694,49 @@ class TestCallbackListener:
         assert "User denied" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_error_callback_html_is_escaped(self, mock_web_config):
+        """An error_description containing HTML is escaped in the response body (CWE-79)."""
+        import threading
+        import time
+        import urllib.error
+        import urllib.request
+        from urllib.parse import urlencode
+
+        auth = AuthManager(mock_web_config)
+        port = _free_port()
+        body = {"body": None}
+
+        def run_listener():
+            try:
+                auth._wait_for_callback(port, timeout=5.0)
+            except AuthError:
+                pass
+
+        listener_thread = threading.Thread(target=run_listener)
+        listener_thread.start()
+        time.sleep(0.2)
+
+        payload = "<script>alert(1)</script>"
+        query = urlencode({"error": "access_denied", "error_description": payload})
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/callback?{query}")
+        except urllib.error.HTTPError as e:
+            body["body"] = e.read().decode()
+
+        listener_thread.join(timeout=5.0)
+        await auth.close()
+
+        assert body["body"] is not None
+        # The raw script tag must not appear; its escaped form must.
+        assert "<script>alert(1)</script>" not in body["body"]
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body["body"]
+
+    @pytest.mark.asyncio
     async def test_timeout_raises_error(self, mock_web_config):
         """Listener raises AuthError on timeout."""
         auth = AuthManager(mock_web_config)
         with pytest.raises(AuthError, match="Timed out"):
-            auth._wait_for_callback(19878, timeout=0.5)
+            auth._wait_for_callback(_free_port(), timeout=0.5)
         await auth.close()
 
     def test_port_from_redirect_uri(self, mock_web_config):
@@ -742,3 +798,291 @@ class TestWebFlowAutoCallback:
         opened_url = mock_browser.call_args[0][0]
         assert "client_id=" in opened_url
         assert "response_type=code" in opened_url
+
+
+class TestCallbackListenerLifecycle:
+    """Tests for the #14 listener lifecycle: port freeing, bind failure, late callback."""
+
+    @pytest.mark.asyncio
+    async def test_port_is_freed_after_timeout(self, mock_web_config):
+        """A timed-out wait releases the redirect port so it can be rebound."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        port = _free_port()
+        auth = AuthManager(mock_web_config)
+        result = {"error": None}
+
+        def run_listener():
+            try:
+                auth._wait_for_callback(port, timeout=0.3)
+            except AuthError as e:
+                result["error"] = str(e)
+
+        listener_thread = threading.Thread(target=run_listener)
+        listener_thread.start()
+        listener_thread.join(timeout=5.0)
+        await auth.close()
+
+        assert listener_thread.is_alive() is False
+        assert "Timed out" in result["error"]
+
+        # The port must now be free to rebind.
+        server = HTTPServer(("127.0.0.1", port), BaseHTTPRequestHandler)
+        server.server_close()
+
+    @pytest.mark.asyncio
+    async def test_second_attempt_after_timeout_succeeds(self, mock_web_config):
+        """A retry on the same port after a timeout captures a code without hanging."""
+        import threading
+        import time
+        import urllib.request
+
+        port = _free_port()
+        auth = AuthManager(mock_web_config)
+
+        # First attempt times out.
+        with pytest.raises(AuthError, match="Timed out"):
+            auth._wait_for_callback(port, timeout=0.3)
+
+        # Second attempt on the same port must start and capture a code.
+        result = {}
+
+        def run_listener():
+            result["code"] = auth._wait_for_callback(port, timeout=5.0)
+
+        listener_thread = threading.Thread(target=run_listener)
+        listener_thread.start()
+        time.sleep(0.2)
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/callback?code=retry-code")
+        listener_thread.join(timeout=5.0)
+        await auth.close()
+
+        assert result["code"] == "retry-code"
+
+    @pytest.mark.asyncio
+    async def test_bind_failure_raises_autherror_not_hang(self, mock_web_config):
+        """A pre-bound port surfaces as AuthError within a bounded time, never hangs."""
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        # Occupy a known-bound port by binding it ourselves (port 0 lets the OS
+        # pick a free one), then pass that port so the bind deterministically fails.
+        blocker = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        port = blocker.server_address[1]
+        auth = AuthManager(mock_web_config)
+        try:
+            with pytest.raises(AuthError, match="bind|in use|still hold"):
+                await asyncio.wait_for(
+                    asyncio.to_thread(auth._wait_for_callback, port, 5.0),
+                    timeout=3.0,
+                )
+        finally:
+            blocker.server_close()
+            await auth.close()
+
+    @pytest.mark.asyncio
+    async def test_late_callback_not_reported_as_success(self, mock_web_config):
+        """A callback arriving after the timeout hits a closed port, not a success page."""
+        import urllib.error
+        import urllib.request
+
+        port = _free_port()
+        auth = AuthManager(mock_web_config)
+
+        with pytest.raises(AuthError, match="Timed out"):
+            auth._wait_for_callback(port, timeout=0.3)
+
+        # The listener is gone, so a late callback cannot connect.
+        with pytest.raises((urllib.error.URLError, ConnectionError)):
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/callback?code=late", timeout=2.0)
+        await auth.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_web_flow_dispatches_wait_off_event_loop(self, mock_web_config):
+        """The web flow awaits the blocking wait via asyncio.to_thread (issue #14)."""
+        respx.post(f"{mock_web_config.oauth2_url}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "offloop-token", "expires_in": 3600},
+            )
+        )
+
+        auth = AuthManager(mock_web_config)
+        real_to_thread = asyncio.to_thread
+        observed = {}
+
+        async def spy_to_thread(func, *args, **kwargs):
+            observed["func"] = func
+            return await real_to_thread(func, *args, **kwargs)
+
+        with patch.object(AuthManager, "_wait_for_callback", return_value="code") as m:
+            with patch("accelo_mcp.auth.webbrowser.open"):
+                with patch("accelo_mcp.auth.asyncio.to_thread", side_effect=spy_to_thread):
+                    token = await auth.get_token()
+        await auth.close()
+
+        assert token == "offloop-token"
+        assert observed["func"] == m
+
+
+class TestInstalledFlowTTY:
+    """Tests for the #14 installed/TTY PIN-prompt guard."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_installed_flow_refuses_when_stdin_not_tty(self, mock_installed_config):
+        """A non-TTY stdin raises AuthError with NO side effects.
+
+        The guard now runs before the authorize POST, the browser open, and any
+        printing, so the browser must never be opened and the PIN prompt never
+        reached when stdin is not a TTY (issue #14).
+        """
+        import builtins
+        import sys
+
+        authorize_route = respx.post(f"{mock_installed_config.oauth2_url}/authorize").mock(
+            return_value=httpx.Response(302, headers={"location": "https://approve.example"})
+        )
+
+        def boom(*args, **kwargs):
+            raise AssertionError("input() must not be called when stdin is not a TTY")
+
+        auth = AuthManager(mock_installed_config)
+        with patch.object(sys.stdin, "isatty", return_value=False):
+            with patch("accelo_mcp.auth.webbrowser.open") as mock_browser:
+                with patch.object(builtins, "input", side_effect=boom):
+                    with pytest.raises(AuthError, match="TTY|stdin"):
+                        await auth.get_token()
+        await auth.close()
+
+        # No side effects: no browser open and no authorize request were made.
+        mock_browser.assert_not_called()
+        assert authorize_route.call_count == 0
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_installed_flow_prompts_when_stdin_is_tty(self, mock_installed_config):
+        """A TTY stdin prompts for the PIN once and exchanges it for a token."""
+        import builtins
+        import sys
+
+        def side_effect(request):
+            if str(request.url).endswith("/authorize"):
+                return httpx.Response(302, headers={"location": "https://approve.example"})
+            return httpx.Response(200, json={"access_token": "installed-token", "expires_in": 3600})
+
+        respx.post(f"{mock_installed_config.oauth2_url}/authorize").mock(side_effect=side_effect)
+        respx.post(f"{mock_installed_config.oauth2_url}/token").mock(side_effect=side_effect)
+
+        auth = AuthManager(mock_installed_config)
+        with patch.object(sys.stdin, "isatty", return_value=True):
+            with patch("accelo_mcp.auth.webbrowser.open"):
+                with patch.object(builtins, "input", return_value="1234") as mock_input:
+                    token = await auth.get_token()
+        await auth.close()
+
+        assert token == "installed-token"
+        mock_input.assert_called_once()
+
+
+class TestRefreshConcurrency:
+    """Tests for the #15 refresh/acquire serialisation."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_concurrent_get_token_refreshes_once(self, mock_web_config):
+        """Ten concurrent get_token() calls on an expired token refresh exactly once."""
+        route = respx.post(f"{mock_web_config.oauth2_url}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "concurrent-refreshed",
+                    "refresh_token": "rotated-refresh",
+                    "expires_in": 3600,
+                },
+            )
+        )
+
+        auth = AuthManager(mock_web_config)
+        auth._token = "old-token"
+        auth._refresh_token = "old-refresh"
+        auth._expires_at = time.time() - 100  # expired
+
+        results = await asyncio.gather(*[auth.get_token() for _ in range(10)])
+        await auth.close()
+
+        assert all(r == "concurrent-refreshed" for r in results)
+        assert route.call_count == 1
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_concurrent_first_acquire_calls_token_endpoint_once(self, mock_config):
+        """Ten concurrent first-acquire calls hit the token endpoint exactly once."""
+        route = respx.post(f"{mock_config.oauth2_url}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "acquired-once", "expires_in": 3600},
+            )
+        )
+
+        auth = AuthManager(mock_config)
+        results = await asyncio.gather(*[auth.get_token() for _ in range(10)])
+        await auth.close()
+
+        assert all(r == "acquired-once" for r in results)
+        assert route.call_count == 1
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_refresh_lock_is_created_lazily(self, mock_config):
+        """The refresh lock is None until the first get_token, an asyncio.Lock after."""
+        respx.post(f"{mock_config.oauth2_url}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "token", "expires_in": 3600},
+            )
+        )
+
+        auth = AuthManager(mock_config)
+        assert auth._refresh_lock is None
+        await auth.get_token()
+        await auth.close()
+
+        assert isinstance(auth._refresh_lock, asyncio.Lock)
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_refresh_keeps_token_when_concurrent_winner_rotated(self, mock_web_config):
+        """invalid_grant only clears the refresh token when it still equals the sent one.
+
+        Drives _refresh_token_flow directly: a non-invalid_grant failure never clears,
+        and an invalid_grant failure after the stored token has been rotated by another
+        caller does not clobber the newer token.
+        """
+        # Non-invalid_grant failure must never clear the token.
+        respx.post(f"{mock_web_config.oauth2_url}/token").mock(
+            return_value=httpx.Response(503, json={"error": "temporarily_unavailable"})
+        )
+        auth = AuthManager(mock_web_config)
+        auth._refresh_token = "live-refresh"
+        with pytest.raises(AuthError, match="Token refresh failed"):
+            await auth._refresh_token_flow()
+        assert auth._refresh_token == "live-refresh"
+        await auth.close()
+
+        # invalid_grant while the stored token has been rotated to a newer value
+        # must leave the newer token untouched. Build auth2 first so the closure
+        # below captures a name that is already bound, not a forward reference.
+        auth2 = AuthManager(mock_web_config)
+        auth2._refresh_token = "sent-refresh"
+
+        def rotate_then_fail(request):
+            auth2._refresh_token = "newer-refresh"
+            return httpx.Response(400, json={"error": "invalid_grant"})
+
+        respx.post(f"{mock_web_config.oauth2_url}/token").mock(side_effect=rotate_then_fail)
+        with pytest.raises(AuthError, match="Token refresh failed"):
+            await auth2._refresh_token_flow()
+        assert auth2._refresh_token == "newer-refresh"
+        await auth2.close()

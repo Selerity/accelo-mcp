@@ -61,9 +61,19 @@ class AcceloClient:
         """GET request to Accelo API."""
         return await self._request("GET", path, params=params)
 
-    async def post(self, path: str, data: dict[str, Any] | None = None) -> dict:
-        """POST request to Accelo API."""
-        return await self._request("POST", path, data=data)
+    async def post(
+        self,
+        path: str,
+        data: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> dict:
+        """POST request to Accelo API.
+
+        When ``json`` is supplied the body is sent as JSON
+        (Content-Type: application/json); otherwise ``data`` is sent
+        form-encoded exactly as before.
+        """
+        return await self._request("POST", path, data=data, json=json)
 
     async def put(self, path: str, data: dict[str, Any] | None = None) -> dict:
         """PUT request to Accelo API."""
@@ -79,15 +89,21 @@ class AcceloClient:
         path: str,
         params: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
         _retry: bool = True,
     ) -> dict:
         """Execute an API request with auth, rate limit tracking, and retry."""
         token = await self._auth.get_token()
         url = f"{self._base_url}{path}"
 
+        # Send a JSON body when ``json`` is provided; otherwise keep the
+        # existing form-encoded path byte-for-byte.
+        content_type = (
+            "application/json" if json is not None else "application/x-www-form-urlencoded"
+        )
         headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": content_type,
         }
 
         response = await self._http.request(
@@ -96,6 +112,7 @@ class AcceloClient:
             headers=headers,
             params=params,
             data=data,
+            json=json,
         )
 
         # Track rate limits from response headers
@@ -106,7 +123,9 @@ class AcceloClient:
             logger.info("Got 401, refreshing token and retrying")
             self._auth._token = None  # Force re-acquisition
             self._auth._expires_at = 0
-            return await self._request(method, path, params=params, data=data, _retry=False)
+            return await self._request(
+                method, path, params=params, data=data, json=json, _retry=False
+            )
 
         # Handle 429 — rate limited
         if response.status_code == 429:
@@ -119,7 +138,9 @@ class AcceloClient:
         if response.status_code >= 500 and _retry:
             logger.warning("Got %d, retrying in 1s", response.status_code)
             await asyncio.sleep(1)
-            return await self._request(method, path, params=params, data=data, _retry=False)
+            return await self._request(
+                method, path, params=params, data=data, json=json, _retry=False
+            )
 
         # Parse response
         try:

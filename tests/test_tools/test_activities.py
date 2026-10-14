@@ -446,6 +446,151 @@ class TestCreateActivity:
         assert "visibility" not in body
         assert "date_started" not in body
 
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_with_to_staff(self, server_and_client):
+        """A sole `to` recipient is sent as JSON and stays `to` (not downgraded)."""
+        server, client = server_and_client
+
+        route = respx.post(f"{BASE}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "2004"}},
+            )
+        )
+
+        await server.call_tool(
+            "accelo_create_activity",
+            {
+                "subject": "Status update",
+                "against_type": "company",
+                "against_id": 39,
+                "to": {"staff": [10]},
+            },
+        )
+        await client.close()
+
+        request = route.calls[0].request
+        assert request.headers["content-type"] == "application/json"
+        parsed = json.loads(request.content)
+        assert parsed["to"] == {"staff": [10]}
+        assert parsed["subject"] == "Status update"
+        assert parsed["against_type"] == "company"
+        assert parsed["against_id"] == 39
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_with_cc_affiliation_and_bcc_emails(self, server_and_client):
+        server, client = server_and_client
+
+        route = respx.post(f"{BASE}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "2005"}},
+            )
+        )
+
+        await server.call_tool(
+            "accelo_create_activity",
+            {
+                "subject": "Mailout",
+                "against_type": "company",
+                "against_id": 39,
+                "cc": {"affiliation": [13, 14]},
+                "bcc": {"emails": ["bcc@x.com", "fred@freddy.com"]},
+            },
+        )
+        await client.close()
+
+        request = route.calls[0].request
+        assert request.headers["content-type"] == "application/json"
+        parsed = json.loads(request.content)
+        assert parsed["cc"]["affiliation"] == [13, 14]
+        assert parsed["bcc"]["emails"] == ["bcc@x.com", "fred@freddy.com"]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_no_recipient_still_form_encoded(self, server_and_client):
+        """With no recipient role the request stays on the form-encoded path."""
+        server, client = server_and_client
+
+        route = respx.post(f"{BASE}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "2006"}},
+            )
+        )
+
+        await server.call_tool(
+            "accelo_create_activity",
+            {"subject": "Plain note", "against_type": "company", "against_id": 39},
+        )
+        await client.close()
+
+        request = route.calls[0].request
+        assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+        assert "subject=" in request.content.decode()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_invalid_role_returns_structured_error(self, server_and_client):
+        """An invalid recipient shape returns a structured error with no HTTP call."""
+        server, client = server_and_client
+
+        route = respx.post(f"{BASE}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "2007"}},
+            )
+        )
+
+        result = parse_result(
+            await server.call_tool(
+                "accelo_create_activity",
+                {
+                    "subject": "Bad recipient",
+                    "against_type": "company",
+                    "against_id": 39,
+                    "to": {"staff": ["not-an-int"]},
+                },
+            )
+        )
+        await client.close()
+
+        assert result["error"] == "invalid_recipient"
+        assert result["role"] == "to"
+        assert route.call_count == 0
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_empty_recipient_list_returns_structured_error(self, server_and_client):
+        """An empty recipient list is rejected with no HTTP call."""
+        server, client = server_and_client
+
+        route = respx.post(f"{BASE}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "2008"}},
+            )
+        )
+
+        result = parse_result(
+            await server.call_tool(
+                "accelo_create_activity",
+                {
+                    "subject": "Empty recipient",
+                    "against_type": "company",
+                    "against_id": 39,
+                    "to": {"staff": []},
+                },
+            )
+        )
+        await client.close()
+
+        assert result["error"] == "invalid_recipient"
+        assert result["role"] == "to"
+        assert route.call_count == 0
+
 
 class TestUpdateActivity:
     @respx.mock

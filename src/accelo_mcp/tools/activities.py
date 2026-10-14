@@ -8,6 +8,36 @@ from mcp.server.mcpserver import MCPServer
 
 from ..client import AcceloClient, build_params
 
+_VALID_ROLE_KEYS = ("staff", "affiliation", "emails")
+
+
+def _validate_role(name: str, value: Any) -> str | None:
+    """Validate a to/cc/bcc recipient dict.
+
+    Returns ``None`` when the value is a valid role object, or a human-readable
+    reason string when it is not. A valid role is a dict whose keys are a subset
+    of ``staff``, ``affiliation`` and ``emails``; ``staff``/``affiliation`` map
+    to lists of ints (bools are rejected) and ``emails`` maps to a list of
+    strings.
+    """
+    if not isinstance(value, dict):
+        return f"'{name}' must be an object keyed by staff/affiliation/emails"
+    if not value:
+        return f"'{name}' must contain at least one of staff/affiliation/emails"
+    for key, items in value.items():
+        if key not in _VALID_ROLE_KEYS:
+            return f"'{name}' has unknown key '{key}'; allowed keys are staff/affiliation/emails"
+        if not isinstance(items, list) or not items:
+            return f"'{name}.{key}' must be a non-empty list"
+        if key == "emails":
+            if not all(isinstance(item, str) for item in items):
+                return f"'{name}.emails' must be a list of email strings"
+        else:
+            # staff/affiliation are lists of ints; reject bools (bool is an int subclass).
+            if not all(isinstance(item, int) and not isinstance(item, bool) for item in items):
+                return f"'{name}.{key}' must be a list of integer ids"
+    return None
+
 
 def register(server: MCPServer, client: AcceloClient):
     """Register activity tools with the MCP server."""
@@ -116,9 +146,31 @@ def register(server: MCPServer, client: AcceloClient):
         task: int | None = None,
         visibility: str | None = None,
         date_started: int | None = None,
+        to: dict[str, list] | None = None,
+        cc: dict[str, list] | None = None,
+        bcc: dict[str, list] | None = None,
         fields: str | None = None,
     ) -> dict:
         """Create a new activity (note, email, call, or meeting).
+
+        Owner vs recipients: owner_type/owner_id set the activity's SENDER
+        (the from/author interaction). The to/cc/bcc arguments set the RECIPIENT
+        interactions and are independent of the owner. Naming a recipient under
+        `to` now addresses the activity TO them — this fixes the previous
+        behaviour where a non-owner recipient was recorded as bcc.
+
+        Each of to/cc/bcc is an object keyed by one or more of:
+            - staff: list of staff ids (ints)
+            - affiliation: list of affiliation ids (ints)
+            - emails: list of raw email address strings
+        For example: to={"staff": [10]}, cc={"affiliation": [13, 14]},
+        bcc={"emails": ["person@example.com"]}.
+
+        Supplying any of to/cc/bcc sends the request to Accelo as a single JSON
+        body (the normal activity fields plus the recipient objects). Raw emails
+        passed under `emails` create no interact object on the Accelo side (this
+        is expected). When none of to/cc/bcc is supplied the activity is sent via
+        the existing form-encoded path, unchanged.
 
         Args:
             subject: Activity subject (required)
@@ -129,8 +181,9 @@ def register(server: MCPServer, client: AcceloClient):
             medium: Type — 'note', 'meeting', 'email', or 'call' (default: note)
             priority_id: Priority ID
             class_id: Activity class ID
-            owner_type: Owner type ('staff' or 'affiliation')
-            owner_id: Owner ID (staff_id or affiliation_id)
+            owner_type: Owner type ('staff' or 'affiliation'). Sets the SENDER
+                (from/author), not a recipient.
+            owner_id: Owner ID (staff_id or affiliation_id). Sets the SENDER.
             billable: Billable time in seconds
             nonbillable: Non-billable time in seconds
             task: Task ID to log the activity against. To log time against a task,
@@ -143,6 +196,12 @@ def register(server: MCPServer, client: AcceloClient):
                 meetings this is the scheduled start; for other activities it sets the
                 logged date (date_logged derives from date_started, falling back to
                 date_created when unset).
+            to: TO recipients — object keyed by staff/affiliation/emails, e.g.
+                {"staff": [10]}. Addresses the activity TO these recipients.
+            cc: CC recipients — object keyed by staff/affiliation/emails, e.g.
+                {"affiliation": [13, 14]}.
+            bcc: BCC recipients — object keyed by staff/affiliation/emails, e.g.
+                {"emails": ["person@example.com"]}.
             fields: Additional fields to return
         """
         data: dict[str, Any] = {
@@ -174,6 +233,25 @@ def register(server: MCPServer, client: AcceloClient):
             data["date_started"] = date_started
         if fields:
             data["_fields"] = fields
+
+        # When any recipient role is supplied, Accelo requires a single JSON
+        # body carrying the activity fields alongside the to/cc/bcc objects.
+        roles = {"to": to, "cc": cc, "bcc": bcc}
+        if any(value is not None for value in roles.values()):
+            json_body = dict(data)
+            for role_name, role_value in roles.items():
+                if role_value is None:
+                    continue
+                reason = _validate_role(role_name, role_value)
+                if reason is not None:
+                    return {
+                        "error": "invalid_recipient",
+                        "message": reason,
+                        "role": role_name,
+                    }
+                json_body[role_name] = role_value
+            return await client.post("/activities", json=json_body)
+
         return await client.post("/activities", data=data)
 
     @server.tool()

@@ -357,3 +357,149 @@ class TestAcceloClientRequests:
 
         assert result["response"]["id"] == "1"
         assert call_count == 2
+
+
+class TestAcceloClientJsonBody:
+    """Tests for the JSON-body POST path (post(..., json=...))."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_post_json_sends_json_body_and_content_type(self, mock_config):
+        """json= sends application/json; data= still sends form-encoded."""
+        import json as json_lib
+
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        route = respx.post(f"{mock_config.base_url}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "1"}},
+            )
+        )
+
+        await client.post("/activities", json={"subject": "x", "to": {"staff": [10]}})
+
+        json_request = route.calls[0].request
+        assert json_request.headers["content-type"] == "application/json"
+        parsed = json_lib.loads(json_request.content)
+        assert parsed["subject"] == "x"
+        assert parsed["to"]["staff"] == [10]
+
+        # The form-encoded path must still send application/x-www-form-urlencoded.
+        await client.post("/activities", data={"name": "y"})
+        await client.close()
+
+        form_request = route.calls[1].request
+        assert form_request.headers["content-type"] == "application/x-www-form-urlencoded"
+        assert form_request.content.decode() == "name=y"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_json_body_resent_on_401_refresh(self, mock_config):
+        """The JSON body is re-sent through the 401-refresh retry recursion."""
+        import json as json_lib
+
+        auth = AuthManager(mock_config)
+        auth._token = "expired-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        call_count = 0
+
+        def side_effect(request):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(401, json={"meta": {"status": "invalid_client"}})
+            return httpx.Response(200, json={"meta": {"status": "ok"}, "response": {"id": "1"}})
+
+        route = respx.post(f"{mock_config.base_url}/activities").mock(side_effect=side_effect)
+        respx.post(f"{mock_config.oauth2_url}/token").mock(
+            return_value=httpx.Response(200, json={"access_token": "new-token", "expires_in": 3600})
+        )
+
+        await client.post("/activities", json={"subject": "x", "cc": {"affiliation": [13]}})
+        await client.close()
+
+        assert call_count == 2
+        for call in route.calls:
+            parsed = json_lib.loads(call.request.content)
+            assert parsed["subject"] == "x"
+            assert parsed["cc"]["affiliation"] == [13]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_json_post_sends_single_content_type_header(self, mock_config):
+        """A JSON POST carries exactly one application/json Content-Type header."""
+        import json as json_lib
+
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        route = respx.post(f"{mock_config.base_url}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "1"}},
+            )
+        )
+
+        await client.post("/activities", json={"subject": "x", "to": {"staff": [10]}})
+        await client.close()
+
+        request = route.calls[0].request
+        # Inspect the parsed header multimap, not a raw substring, so there is
+        # no duplicate Content-Type (httpx would add its own alongside ours).
+        content_types = request.headers.get_list("content-type")
+        assert content_types == ["application/json"]
+        parsed = json_lib.loads(request.content)
+        assert parsed == {"subject": "x", "to": {"staff": [10]}}
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_form_post_sends_form_content_type(self, mock_config):
+        """A form POST still sends application/x-www-form-urlencoded and the body."""
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        route = respx.post(f"{mock_config.base_url}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "1"}},
+            )
+        )
+
+        await client.post("/activities", data={"name": "y"})
+        await client.close()
+
+        request = route.calls[0].request
+        assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+        assert request.content.decode() == "name=y"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_get_carries_no_form_content_type(self, mock_config):
+        """A bodyless GET carries no form Content-Type (header may be absent)."""
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        route = respx.get(f"{mock_config.base_url}/thing").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": []},
+            )
+        )
+
+        await client.get("/thing")
+        await client.close()
+
+        request = route.calls[0].request
+        assert "application/x-www-form-urlencoded" not in request.headers.get("content-type", "")

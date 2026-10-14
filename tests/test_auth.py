@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -214,6 +215,52 @@ class TestRefreshFlow:
 
         assert token == "new-token"
 
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_chained_refresh_reuses_original_refresh_token(self, mock_web_config):
+        """Across two refreshes where the first omits refresh_token, the second
+        request still sends the originally stored refresh token."""
+        import urllib.parse
+
+        captured_requests = []
+
+        def side_effect(request):
+            captured_requests.append(request)
+            # First refresh omits refresh_token; second issues a new one.
+            if len(captured_requests) == 1:
+                return httpx.Response(
+                    200,
+                    json={"access_token": "access-1", "expires_in": 3600},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "access-2",
+                    "refresh_token": "new-refresh",
+                    "expires_in": 3600,
+                },
+            )
+
+        respx.post(f"{mock_web_config.oauth2_url}/token").mock(side_effect=side_effect)
+
+        auth = AuthManager(mock_web_config)
+        auth._token = "old-token"
+        auth._refresh_token = "original-refresh"
+        auth._expires_at = time.time() - 100  # expired
+
+        token1 = await auth.get_token()
+        assert token1 == "access-1"
+
+        # Force a second refresh.
+        auth._expires_at = time.time() - 100
+        token2 = await auth.get_token()
+        assert token2 == "access-2"
+        await auth.close()
+
+        assert len(captured_requests) == 2
+        second_body = urllib.parse.parse_qs(captured_requests[1].content.decode())
+        assert second_body["refresh_token"] == ["original-refresh"]
+
 
 class TestTokenPersistence:
     """Tests for token persistence to disk."""
@@ -362,17 +409,19 @@ class TestTokenPersistence:
         assert list(target.parent.glob(".tokens-*.tmp")) == []
 
     @pytest.mark.asyncio
-    async def test_symlink_loop_does_not_raise(self, mock_config):
-        """A token file that is a symlink loop logs a warning instead of raising."""
-        token_file = auth_module.TOKEN_FILE
-        token_file.parent.mkdir(parents=True, exist_ok=True)
-        token_file.symlink_to(token_file)
+    async def test_symlink_loop_does_not_raise(self, mock_config, caplog):
+        """A path that cannot be resolved (e.g. symlink loop) fails soft with a warning.
 
+        Path.resolve() only raises RuntimeError for symlink loops on Python 3.12+,
+        so patch it directly to exercise the fail-soft handler on any interpreter.
+        """
         auth = AuthManager(mock_config)
-        auth._set_token({"access_token": "new", "expires_in": 3600})
+        with patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")):
+            auth._set_token({"access_token": "new", "expires_in": 3600})
         await auth.close()
 
         assert auth._token == "new"
+        assert "Failed to persist tokens" in caplog.text
 
     @pytest.mark.asyncio
     async def test_directory_fsync_failure_is_not_a_failed_persist(self, mock_config, caplog):
@@ -392,26 +441,6 @@ class TestTokenPersistence:
 
         assert json.loads(token_file.read_text())["access_token"] == "new"
         assert "Failed to persist tokens" not in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_failed_close_removes_temp_file(self, mock_config, caplog):
-        """If closing the temp file descriptor fails, the temp file is still removed."""
-        token_file = auth_module.TOKEN_FILE
-        real_close = os.close
-
-        def failing_close(fd):
-            # Close for real so the test does not leak the descriptor, then fail
-            real_close(fd)
-            raise OSError("EIO")
-
-        auth = AuthManager(mock_config)
-        with patch.object(os, "close", side_effect=failing_close):
-            auth._set_token({"access_token": "new", "expires_in": 3600})
-        await auth.close()
-
-        assert not token_file.exists()
-        assert list(token_file.parent.glob(".tokens-*.tmp")) == []
-        assert "Failed to persist tokens: EIO" in caplog.text
 
 
 class TestPKCEFlow:

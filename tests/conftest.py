@@ -10,7 +10,11 @@ from accelo_mcp.config import AcceloConfig
 
 @pytest.fixture(autouse=True)
 def isolated_token_file(tmp_path, monkeypatch):
-    """Point token storage at a temp directory so tests never touch ~/.accelo-mcp."""
+    """Point token storage at a temp directory so tests never touch ~/.accelo-mcp.
+
+    The auth module resolves paths via _token_dir()/_token_file(), which read
+    these globals at call time, so patching the globals is enough for isolation.
+    """
     token_dir = tmp_path / ".accelo-mcp"
     monkeypatch.setattr(auth_module, "TOKEN_DIR", token_dir)
     monkeypatch.setattr(auth_module, "TOKEN_FILE", token_dir / "tokens.json")

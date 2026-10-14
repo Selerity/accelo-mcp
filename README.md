@@ -64,7 +64,7 @@ Copy `.env.example` to `.env`, or provide these variables through the MCP host:
 | `ACCELO_SCOPE` | No | `read(all)` | OAuth2 scope; defaults to read-only. Add write access explicitly, e.g. `read(all),write(all)`, only if you need the write tools |
 | `ACCELO_REDIRECT_URI` | For `web` and `public` | `http://localhost:9876/callback` (`web` only) | Local OAuth callback URL. Optional for `web` (defaults as shown); **required for `public`** with no default. Must exactly match the redirect URI registered on the Accelo application. |
 
-HTTP transport variables (only used with `--http` or `--sse`):
+HTTP transport variables (used only with `--http` or `--sse`):
 
 > **Single-user scope.** The HTTP / SSE transports have **no inbound
 > authentication** and act with one shared Accelo identity for every caller.
@@ -72,17 +72,22 @@ HTTP transport variables (only used with `--http` or `--sse`):
 > responsibility to ensure only the one intended user can reach it. See the
 > fuller note under [Usage](#usage) and [`SECURITY.md`](SECURITY.md).
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ACCELO_MCP_HOST` | `127.0.0.1` | Interface to bind. `127.0.0.1` keeps it local-only (recommended). Only set `0.0.0.0` inside a container, and publish the port to loopback on the host — see the single-user scope note above and [`SECURITY.md`](SECURITY.md). |
-| `ACCELO_MCP_PORT` | `3000` | TCP port to listen on. |
-| `ACCELO_MCP_PATH` | `/mcp` | Streamable HTTP endpoint path. |
-| `ACCELO_MCP_JSON_RESPONSE` | `false` | Return a single JSON response instead of an SSE stream. |
-| `ACCELO_MCP_STATELESS` | `false` | Run without per-session MCP protocol state. This only affects the transport-level session the MCP library tracks; it does **not** add per-user credentials — every request still uses the one shared Accelo identity (see the single-user scope note above). |
-| `ACCELO_MCP_ALLOWED_HOSTS` | — | Comma-separated `Host` header allow-list for DNS-rebinding protection. Matching is **exact unless an entry ends in `:*`**, and clients send the bound port, so use the `host:*` form — e.g. `127.0.0.1:*,localhost:*` for a loopback-published container, or `your-host:*` behind a proxy. Required when the server is reached through any hostname other than `localhost`. A non-standard loopback bind also needs it: e.g. `ACCELO_MCP_HOST=127.0.0.5` fails closed (every request `421`) unless you set `ACCELO_MCP_ALLOWED_HOSTS=127.0.0.5:*`. |
-| `ACCELO_MCP_ALLOWED_ORIGINS` | — | Comma-separated `Origin` header allow-list. |
-| `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION` | `false` | Disable the `Host`/`Origin` check entirely. Prefer setting the allow-lists above instead. On a non-loopback bind, this is the explicit override that lets the server start with no allow-list (otherwise it refuses — see below). |
-| `ACCELO_MCP_ALLOW_UNAUTHENTICATED` | `false` | Acknowledge that the HTTP transport has no inbound authentication. **Required to start on a non-loopback bind** (e.g. `0.0.0.0`); the server refuses to start on a non-loopback host without it, to prevent accidental exposure. On a non-loopback bind the server **also** requires `ACCELO_MCP_ALLOWED_HOSTS` (an `Origin` allow-list alone does not close the DNS-rebinding gap) — or an explicit `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true` — otherwise it refuses. See [`SECURITY.md`](SECURITY.md). |
+The boolean variables accept `1/true/yes/on` or `0/false/no/off` (case-insensitive).
+To use a default, leave the line unset (not blank); a present-but-blank value is
+rejected at startup. The **Applies to** column shows which transport consumes each
+variable — `--http only` variables are ignored under `--sse`.
+
+| Variable | Default | Applies to | Description |
+|----------|---------|------------|-------------|
+| `ACCELO_MCP_HOST` | `127.0.0.1` | `--http`, `--sse` | Interface to bind. `127.0.0.1` keeps it local-only (recommended). Only set `0.0.0.0` inside a container, and publish the port to loopback on the host — see the single-user scope note above and [`SECURITY.md`](SECURITY.md). |
+| `ACCELO_MCP_PORT` | `3000` | `--http`, `--sse` | TCP port to listen on. |
+| `ACCELO_MCP_PATH` | `/mcp` | `--http` only | Streamable HTTP endpoint path. Must start with `/`; a value without a leading slash is rejected at startup. SSE does not use a configurable path. |
+| `ACCELO_MCP_JSON_RESPONSE` | `false` | `--http` only | Return a single JSON response instead of an SSE stream. |
+| `ACCELO_MCP_STATELESS` | `false` | `--http` only | Run without per-session MCP protocol state. This only affects the transport-level session the MCP library tracks; it does **not** add per-user credentials — every request still uses the one shared Accelo identity (see the single-user scope note above). |
+| `ACCELO_MCP_ALLOWED_HOSTS` | — | `--http`, `--sse` | Comma-separated `Host` header allow-list for DNS-rebinding protection. Matching is **exact unless an entry ends in `:*`**, and clients send the bound port, so use the `host:*` form — e.g. `127.0.0.1:*,localhost:*` for a loopback-published container, or `your-host:*` behind a proxy. Required when the server is reached through any hostname other than `localhost`. A non-standard loopback bind also needs it: e.g. `ACCELO_MCP_HOST=127.0.0.5` fails closed (every request `421`) unless you set `ACCELO_MCP_ALLOWED_HOSTS=127.0.0.5:*`. |
+| `ACCELO_MCP_ALLOWED_ORIGINS` | — | `--http`, `--sse` | Comma-separated `Origin` header allow-list. |
+| `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION` | `false` | `--http`, `--sse` | Disable the `Host`/`Origin` check entirely. Prefer setting the allow-lists above instead. On a non-loopback bind, this is the explicit override that lets the server start with no allow-list (otherwise it refuses — see below). |
+| `ACCELO_MCP_ALLOW_UNAUTHENTICATED` | `false` | `--http`, `--sse` | Acknowledge that the HTTP transport has no inbound authentication. **Required to start on a non-loopback bind** (e.g. `0.0.0.0`); the server refuses to start on a non-loopback host without it, to prevent accidental exposure. On a non-loopback bind the server **also** requires `ACCELO_MCP_ALLOWED_HOSTS` (an `Origin` allow-list alone does not close the DNS-rebinding gap) — or an explicit `ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION=true` — otherwise it refuses. See [`SECURITY.md`](SECURITY.md). |
 
 Create or obtain an OAuth application for the Accelo deployment you intend to access. Never commit client secrets, refresh tokens, access tokens, cookies, or webhook secrets.
 
@@ -121,6 +126,19 @@ accelo-mcp --http
 ```
 
 This listens on `http://127.0.0.1:3000/mcp` by default.
+
+The transport is chosen by a single flag: `--http` (or its alias
+`--streamable-http`) for Streamable HTTP, `--sse` for the deprecated SSE
+transport, and no flag for the default stdio transport. The flags are mutually
+exclusive — passing a conflicting pair (e.g. `--sse --http`), an unknown flag, or
+a stray argument exits non-zero with a usage message. Run `accelo-mcp --help` for
+the full usage.
+
+When running over HTTP (or SSE), `GET /healthz` returns `200` with
+`{"status": "ok"}` for liveness probes. It is a sibling route that is **not**
+behind the `Host`/`Origin` allow-list, so a load balancer can probe it by
+instance IP even when the DNS-rebinding allow-list would reject `/mcp` for that
+`Host`. It takes no credentials, performs no Accelo call, and returns no secrets.
 
 > **Single-user scope.** This server has no inbound authentication and acts with
 > one shared Accelo identity for every caller (see [`SECURITY.md`](SECURITY.md)).

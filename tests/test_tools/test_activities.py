@@ -561,6 +561,36 @@ class TestCreateActivity:
         assert result["role"] == "to"
         assert route.call_count == 0
 
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_empty_recipient_list_returns_structured_error(self, server_and_client):
+        """An empty recipient list is rejected with no HTTP call."""
+        server, client = server_and_client
+
+        route = respx.post(f"{BASE}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "2008"}},
+            )
+        )
+
+        result = parse_result(
+            await server.call_tool(
+                "accelo_create_activity",
+                {
+                    "subject": "Empty recipient",
+                    "against_type": "company",
+                    "against_id": 39,
+                    "to": {"staff": []},
+                },
+            )
+        )
+        await client.close()
+
+        assert result["error"] == "invalid_recipient"
+        assert result["role"] == "to"
+        assert route.call_count == 0
+
 
 class TestUpdateActivity:
     @respx.mock

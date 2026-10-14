@@ -27,8 +27,8 @@ def _validate_role(name: str, value: Any) -> str | None:
     for key, items in value.items():
         if key not in _VALID_ROLE_KEYS:
             return f"'{name}' has unknown key '{key}'; allowed keys are staff/affiliation/emails"
-        if not isinstance(items, list):
-            return f"'{name}.{key}' must be a list"
+        if not isinstance(items, list) or not items:
+            return f"'{name}.{key}' must be a non-empty list"
         if key == "emails":
             if not all(isinstance(item, str) for item in items):
                 return f"'{name}.emails' must be a list of email strings"
@@ -238,7 +238,7 @@ def register(server: MCPServer, client: AcceloClient):
         # body carrying the activity fields alongside the to/cc/bcc objects.
         roles = {"to": to, "cc": cc, "bcc": bcc}
         if any(value is not None for value in roles.values()):
-            body = dict(data)
+            json_body = dict(data)
             for role_name, role_value in roles.items():
                 if role_value is None:
                     continue
@@ -249,8 +249,8 @@ def register(server: MCPServer, client: AcceloClient):
                         "message": reason,
                         "role": role_name,
                     }
-                body[role_name] = role_value
-            return await client.post("/activities", json=body)
+                json_body[role_name] = role_value
+            return await client.post("/activities", json=json_body)
 
         return await client.post("/activities", data=data)
 

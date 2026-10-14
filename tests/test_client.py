@@ -429,3 +429,77 @@ class TestAcceloClientJsonBody:
             parsed = json_lib.loads(call.request.content)
             assert parsed["subject"] == "x"
             assert parsed["cc"]["affiliation"] == [13]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_json_post_sends_single_content_type_header(self, mock_config):
+        """A JSON POST carries exactly one application/json Content-Type header."""
+        import json as json_lib
+
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        route = respx.post(f"{mock_config.base_url}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "1"}},
+            )
+        )
+
+        await client.post("/activities", json={"subject": "x", "to": {"staff": [10]}})
+        await client.close()
+
+        request = route.calls[0].request
+        # Inspect the parsed header multimap, not a raw substring, so there is
+        # no duplicate Content-Type (httpx would add its own alongside ours).
+        content_types = request.headers.get_list("content-type")
+        assert content_types == ["application/json"]
+        parsed = json_lib.loads(request.content)
+        assert parsed == {"subject": "x", "to": {"staff": [10]}}
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_form_post_sends_form_content_type(self, mock_config):
+        """A form POST still sends application/x-www-form-urlencoded and the body."""
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        route = respx.post(f"{mock_config.base_url}/activities").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": {"id": "1"}},
+            )
+        )
+
+        await client.post("/activities", data={"name": "y"})
+        await client.close()
+
+        request = route.calls[0].request
+        assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+        assert request.content.decode() == "name=y"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_get_carries_no_form_content_type(self, mock_config):
+        """A bodyless GET carries no form Content-Type (header may be absent)."""
+        auth = AuthManager(mock_config)
+        auth._token = "test-token"
+        auth._expires_at = 9999999999.0
+        client = AcceloClient(auth, mock_config)
+
+        route = respx.get(f"{mock_config.base_url}/thing").mock(
+            return_value=httpx.Response(
+                200,
+                json={"meta": {"status": "ok"}, "response": []},
+            )
+        )
+
+        await client.get("/thing")
+        await client.close()
+
+        request = route.calls[0].request
+        assert "application/x-www-form-urlencoded" not in request.headers.get("content-type", "")

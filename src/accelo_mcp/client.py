@@ -96,15 +96,13 @@ class AcceloClient:
         token = await self._auth.get_token()
         url = f"{self._base_url}{path}"
 
-        # Send a JSON body when ``json`` is provided; otherwise keep the
-        # existing form-encoded path byte-for-byte.
-        content_type = (
-            "application/json" if json is not None else "application/x-www-form-urlencoded"
-        )
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": content_type,
-        }
+        # Only set Content-Type ourselves for the form-encoded path (``data``);
+        # for a JSON body httpx sets ``application/json`` from the ``json=``
+        # kwarg, so setting it here as well would send a duplicate header. A
+        # bodyless GET/DELETE carries no form Content-Type at all.
+        headers = {"Authorization": f"Bearer {token}"}
+        if data is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
 
         response = await self._http.request(
             method,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import ipaddress
 import logging
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .auth import AuthManager
 from .client import AcceloClient
@@ -43,6 +46,17 @@ def create_server() -> tuple[MCPServer, AcceloClient]:
     server = MCPServer("accelo-mcp")
     register_all_tools(server, client)
 
+    @server.custom_route("/healthz", methods=["GET"], include_in_schema=False)
+    async def healthz(request: Request) -> JSONResponse:
+        """Liveness probe.
+
+        Registered as a custom route (a sibling of the MCP endpoint, not wrapped
+        by the session/SSE manager), so it is reachable without the Host/Origin
+        allow-list — a load balancer can probe by instance IP. Under stdio there
+        is no listener, so the registration is simply inert.
+        """
+        return JSONResponse({"status": "ok"})
+
     logger.info(
         "Accelo MCP server configured for deployment '%s' (auth_type=%s)",
         config.deployment,
@@ -52,12 +66,32 @@ def create_server() -> tuple[MCPServer, AcceloClient]:
     return server, client
 
 
+_BOOL_TRUE = frozenset(("1", "true", "yes", "on"))
+_BOOL_FALSE = frozenset(("0", "false", "no", "off"))
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
-    """Read a boolean from the environment ('1', 'true', 'yes' are truthy)."""
+    """Read a boolean from the environment, with a clear error on bad input.
+
+    An unset variable returns ``default``. A present value is stripped and
+    lower-cased, then matched against a fixed true vocabulary
+    (``1``/``true``/``yes``/``on``) or false vocabulary
+    (``0``/``false``/``no``/``off``). Anything else — including an empty string —
+    raises ``ValueError`` naming the variable, mirroring :func:`_env_port`. This
+    stops a typo (e.g. ``ACCELO_MCP_STATELESS=ture``) from silently resolving to
+    a default and running the server in the wrong mode.
+    """
     value = os.environ.get(name)
     if value is None:
         return default
-    return value.strip().lower() in ("1", "true", "yes", "on")
+    normalised = value.strip().lower()
+    if normalised in _BOOL_TRUE:
+        return True
+    if normalised in _BOOL_FALSE:
+        return False
+    raise ValueError(
+        f"{name} must be a boolean (one of 1/true/yes/on or 0/false/no/off), got {value!r}"
+    )
 
 
 def _env_list(name: str) -> list[str] | None:
@@ -89,6 +123,31 @@ def _env_port(name: str, default: int) -> int:
     return port
 
 
+def _env_path(name: str, default: str) -> str:
+    """Read an endpoint path from the environment, rejecting an invalid value.
+
+    A path used as a route must start with ``/`` — Starlette treats one without
+    a leading slash as a silent 404 trap rather than an error. Following the
+    "surface operator mistakes" theme of :func:`_env_port`, we reject rather than
+    normalise so a genuine typo is not masked.
+
+    Unset returns ``default``. A present-but-blank value is rejected with a
+    dedicated message (so the operator is not shown the misleading leading-slash
+    error). A present, non-blank value not starting with ``/`` is rejected,
+    reporting the raw pre-strip value so trailing-whitespace typos are visible.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    if value.strip() == "":
+        raise ValueError(
+            f"{name} must not be empty (remove the variable to use the default {default!r})"
+        )
+    if not value.strip().startswith("/"):
+        raise ValueError(f"{name} must start with '/', got {value!r}")
+    return value.strip()
+
+
 @dataclass(frozen=True)
 class HttpTransportSettings:
     """Settings for the HTTP transports (Streamable HTTP and SSE).
@@ -117,7 +176,9 @@ class HttpTransportSettings:
                 local machine and requires ACCELO_MCP_ALLOW_UNAUTHENTICATED=true
                 AND an ACCELO_MCP_ALLOWED_HOSTS allow-list (see SECURITY.md).
             ACCELO_MCP_PORT - TCP port (default 3000)
-            ACCELO_MCP_PATH - Streamable HTTP endpoint path (default /mcp)
+            ACCELO_MCP_PATH - Streamable HTTP endpoint path (default /mcp). Must
+                start with '/'; a value without a leading slash is rejected at
+                startup
             ACCELO_MCP_JSON_RESPONSE - return a single JSON response instead of
                 an SSE stream (default false)
             ACCELO_MCP_STATELESS - run without transport-level MCP protocol
@@ -139,7 +200,7 @@ class HttpTransportSettings:
         return cls(
             host=os.environ.get("ACCELO_MCP_HOST", "127.0.0.1").strip(),
             port=_env_port("ACCELO_MCP_PORT", 3000),
-            path=os.environ.get("ACCELO_MCP_PATH", "/mcp"),
+            path=_env_path("ACCELO_MCP_PATH", "/mcp"),
             json_response=_env_bool("ACCELO_MCP_JSON_RESPONSE"),
             stateless=_env_bool("ACCELO_MCP_STATELESS"),
             allowed_hosts=_env_list("ACCELO_MCP_ALLOWED_HOSTS"),
@@ -377,12 +438,36 @@ def select_transport(argv: list[str]) -> str:
     """Choose the transport from command-line arguments.
 
     Returns one of ``"stdio"``, ``"http"``, or ``"sse"``. stdio is the default.
+
+    Parsed with ``argparse`` so an unknown flag, a stray positional, or a
+    conflicting transport pair (``--sse --http``) exits non-zero with usage,
+    rather than being silently swallowed. ``--http`` and ``--streamable-http``
+    are aliases of one option (both select Streamable HTTP); ``--sse`` is a
+    separate, mutually-exclusive option. ``--help`` is provided automatically.
     """
-    if "--http" in argv or "--streamable-http" in argv:
-        return "http"
-    if "--sse" in argv:
-        return "sse"
-    return "stdio"
+    parser = argparse.ArgumentParser(
+        prog="accelo-mcp",
+        description="Unofficial MCP server for the Accelo CRM platform.",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--http",
+        "--streamable-http",
+        dest="transport",
+        action="store_const",
+        const="http",
+        help="serve over Streamable HTTP (default is stdio)",
+    )
+    group.add_argument(
+        "--sse",
+        dest="transport",
+        action="store_const",
+        const="sse",
+        help="serve over the deprecated SSE transport",
+    )
+    parser.set_defaults(transport="stdio")
+    args = parser.parse_args(argv[1:])
+    return args.transport
 
 
 def main() -> None:
@@ -397,23 +482,33 @@ def main() -> None:
 
     if transport == "http":
         settings = _load_http_settings_or_exit("Streamable HTTP")
+        ts = settings.transport_security()
         logger.info(
             "Starting Accelo MCP server (Streamable HTTP on %s:%d%s, "
-            "stateless=%s, json_response=%s)",
+            "stateless=%s, json_response=%s; dns_rebinding_protection=%s, "
+            "allowed_hosts=%s, allowed_origins=%s)",
             settings.host,
             settings.port,
             settings.path,
             settings.stateless,
             settings.json_response,
+            ts.enable_dns_rebinding_protection,
+            ts.allowed_hosts,
+            ts.allowed_origins,
         )
         asyncio.run(run_streamable_http(settings))
     elif transport == "sse":
         settings = _load_http_settings_or_exit("SSE")
+        ts = settings.transport_security()
         logger.warning(
             "The SSE transport is deprecated; prefer --http (Streamable HTTP). "
-            "Starting Accelo MCP server (SSE on %s:%d)",
+            "Starting Accelo MCP server (SSE on %s:%d; dns_rebinding_protection=%s, "
+            "allowed_hosts=%s, allowed_origins=%s)",
             settings.host,
             settings.port,
+            ts.enable_dns_rebinding_protection,
+            ts.allowed_hosts,
+            ts.allowed_origins,
         )
         asyncio.run(run_sse(settings))
     else:

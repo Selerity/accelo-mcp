@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.testclient import TestClient
 
 from accelo_mcp import server as server_module
-from accelo_mcp.server import HttpTransportSettings, main, select_transport
+from accelo_mcp.server import (
+    HttpTransportSettings,
+    _env_bool,
+    main,
+    run_sse,
+    run_streamable_http,
+    select_transport,
+)
 
 
 class TestSelectTransport:
@@ -23,8 +33,27 @@ class TestSelectTransport:
     def test_sse_flag(self):
         assert select_transport(["accelo-mcp", "--sse"]) == "sse"
 
-    def test_http_wins_over_sse(self):
-        assert select_transport(["accelo-mcp", "--sse", "--http"]) == "http"
+    def test_conflicting_flags_exit(self):
+        # --sse --http is now an error (mutually-exclusive group), not "http wins".
+        with pytest.raises(SystemExit) as exc:
+            select_transport(["accelo-mcp", "--sse", "--http"])
+        assert exc.value.code == 2
+
+    def test_unknown_flag_exits(self):
+        with pytest.raises(SystemExit) as exc:
+            select_transport(["accelo-mcp", "--htpp"])
+        assert exc.value.code == 2
+
+    def test_unknown_positional_exits(self):
+        # parse_args (not parse_known_args) rejects a stray positional.
+        with pytest.raises(SystemExit) as exc:
+            select_transport(["accelo-mcp", "foo"])
+        assert exc.value.code == 2
+
+    def test_help_exits_zero(self):
+        with pytest.raises(SystemExit) as exc:
+            select_transport(["accelo-mcp", "--help"])
+        assert exc.value.code == 0
 
 
 class TestHttpTransportSettings:
@@ -104,6 +133,59 @@ class TestHttpTransportSettings:
         monkeypatch.delenv("ACCELO_MCP_PORT", raising=False)
         assert HttpTransportSettings.from_env().port == 3000
 
+    # --- Strict boolean parsing (moved from TestTransportSecurity + extended) ---
+
+    @pytest.mark.parametrize("value,expected", [("1", True), ("0", False), ("TRUE", True)])
+    def test_bool_parsing(self, monkeypatch, value, expected):
+        monkeypatch.setenv("ACCELO_MCP_STATELESS", value)
+        assert HttpTransportSettings.from_env().stateless is expected
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "on", "ON"])
+    def test_full_true_vocabulary(self, monkeypatch, value):
+        monkeypatch.setenv("ACCELO_MCP_STATELESS", value)
+        assert HttpTransportSettings.from_env().stateless is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "FALSE", "No", "off", "OFF"])
+    def test_full_false_vocabulary(self, monkeypatch, value):
+        monkeypatch.setenv("ACCELO_MCP_STATELESS", value)
+        assert HttpTransportSettings.from_env().stateless is False
+
+    def test_bool_typo_rejected(self, monkeypatch):
+        monkeypatch.setenv("ACCELO_MCP_STATELESS", "ture")
+        with pytest.raises(ValueError, match="ACCELO_MCP_STATELESS"):
+            HttpTransportSettings.from_env()
+
+    def test_blank_bool_rejected_on_stateless(self, monkeypatch):
+        monkeypatch.setenv("ACCELO_MCP_STATELESS", "")
+        with pytest.raises(ValueError, match="ACCELO_MCP_STATELESS"):
+            HttpTransportSettings.from_env()
+
+    def test_blank_bool_rejected_on_json_response(self, monkeypatch):
+        monkeypatch.setenv("ACCELO_MCP_JSON_RESPONSE", "")
+        with pytest.raises(ValueError, match="ACCELO_MCP_JSON_RESPONSE"):
+            HttpTransportSettings.from_env()
+
+    def test_env_bool_unset_uses_default(self, monkeypatch):
+        monkeypatch.delenv("ACCELO_MCP_STATELESS", raising=False)
+        assert _env_bool("ACCELO_MCP_STATELESS") is False
+        assert _env_bool("ACCELO_MCP_STATELESS", default=True) is True
+
+    # --- Path validation (ACCELO_MCP_PATH) ---
+
+    def test_path_without_leading_slash_rejected(self, monkeypatch):
+        monkeypatch.setenv("ACCELO_MCP_PATH", "mcp")
+        with pytest.raises(ValueError, match="ACCELO_MCP_PATH"):
+            HttpTransportSettings.from_env()
+
+    def test_empty_path_rejected(self, monkeypatch):
+        monkeypatch.setenv("ACCELO_MCP_PATH", "")
+        with pytest.raises(ValueError, match="ACCELO_MCP_PATH"):
+            HttpTransportSettings.from_env()
+
+    def test_valid_path_accepted(self, monkeypatch):
+        monkeypatch.setenv("ACCELO_MCP_PATH", "/accelo")
+        assert HttpTransportSettings.from_env().path == "/accelo"
+
 
 class TestTransportSecurity:
     def test_defaults_to_explicit_loopback_allow_list(self):
@@ -159,11 +241,6 @@ class TestTransportSecurity:
         security = settings.transport_security()
         assert security is not None
         assert security.enable_dns_rebinding_protection is False
-
-    @pytest.mark.parametrize("value,expected", [("1", True), ("0", False), ("TRUE", True)])
-    def test_bool_parsing(self, monkeypatch, value, expected):
-        monkeypatch.setenv("ACCELO_MCP_STATELESS", value)
-        assert HttpTransportSettings.from_env().stateless is expected
 
 
 class TestLoopbackDetection:
@@ -367,3 +444,158 @@ class TestMainRefusesBeforeAuth:
 
         with pytest.raises(SystemExit, match="ACCELO_MCP_PORT"):
             main()
+
+
+def _build_healthz_app(transport_security=None):
+    """Build a Streamable HTTP app carrying the /healthz route for testing.
+
+    Registers the route the same way create_server() does (via custom_route),
+    then builds the app — this exercises the real registration path without
+    constructing a client or touching Accelo.
+    """
+    from mcp.server.mcpserver import MCPServer
+    from starlette.responses import JSONResponse
+
+    server = MCPServer("accelo-mcp-test")
+
+    @server.custom_route("/healthz", methods=["GET"], include_in_schema=False)
+    async def healthz(request):
+        return JSONResponse({"status": "ok"})
+
+    return server.streamable_http_app(transport_security=transport_security)
+
+
+class TestHealthz:
+    def test_healthz_returns_200_json(self):
+        client = TestClient(_build_healthz_app())
+        response = client.get("/healthz")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+        assert response.headers["content-type"].startswith("application/json")
+
+    def test_healthz_exempt_from_host_check(self):
+        # A Host the allow-list would reject still reaches /healthz (it is a
+        # sibling route, not wrapped by the session manager's Host check).
+        ts = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*"],
+            allowed_origins=["http://127.0.0.1:*"],
+        )
+        client = TestClient(_build_healthz_app(transport_security=ts))
+        response = client.get("/healthz", headers={"Host": "10.0.0.3"})
+        assert response.status_code == 200
+
+
+class _DummyClient:
+    async def close(self):
+        return None
+
+
+class TestMainStartupLog:
+    """main() logs the effective HTTP security settings on startup."""
+
+    @pytest.fixture(autouse=True)
+    def _loopback_env(self, monkeypatch):
+        for var in (
+            "ACCELO_MCP_PATH",
+            "ACCELO_MCP_JSON_RESPONSE",
+            "ACCELO_MCP_STATELESS",
+            "ACCELO_MCP_ALLOWED_HOSTS",
+            "ACCELO_MCP_ALLOWED_ORIGINS",
+            "ACCELO_MCP_DISABLE_DNS_REBINDING_PROTECTION",
+            "ACCELO_MCP_ALLOW_UNAUTHENTICATED",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("ACCELO_MCP_HOST", "127.0.0.1")
+        monkeypatch.setenv("ACCELO_MCP_PORT", "3000")
+        # Neither serve nor construct a real server.
+        monkeypatch.setattr(server_module.asyncio, "run", lambda coro: coro.close())
+        monkeypatch.setattr(
+            server_module,
+            "create_server",
+            lambda: (object(), _DummyClient()),
+        )
+
+    def test_http_log_includes_security_settings(self, monkeypatch, caplog):
+        monkeypatch.setattr(sys, "argv", ["accelo-mcp", "--http"])
+        with caplog.at_level("INFO"):
+            main()
+        matches = [
+            r.message
+            for r in caplog.records
+            if "Streamable HTTP" in r.message and r.levelname == "INFO"
+        ]
+        assert matches, "expected an INFO startup record for Streamable HTTP"
+        message = matches[0]
+        assert "dns_rebinding_protection=True" in message
+        assert "allowed_hosts=" in message
+        assert "allowed_origins=" in message
+
+    def test_sse_log_includes_security_settings(self, monkeypatch, caplog):
+        monkeypatch.setattr(sys, "argv", ["accelo-mcp", "--sse"])
+        with caplog.at_level("WARNING"):
+            main()
+        matches = [
+            r.message for r in caplog.records if "SSE" in r.message and r.levelname == "WARNING"
+        ]
+        assert matches, "expected a WARNING startup record for SSE"
+        message = matches[0]
+        assert "dns_rebinding_protection=" in message
+        assert "allowed_hosts=" in message
+        assert "allowed_origins=" in message
+        assert "127.0.0.1:3000" in message
+
+
+class TestRunTransports:
+    """Pins the kwargs each transport passes to the MCP library."""
+
+    async def test_streamable_http_passes_full_kwargs(self, monkeypatch):
+        mock_run = AsyncMock()
+        monkeypatch.setattr(server_module.MCPServer, "run_streamable_http_async", mock_run)
+        monkeypatch.setattr(
+            server_module,
+            "create_server",
+            lambda: (server_module.MCPServer("t"), _DummyClient()),
+        )
+        settings = HttpTransportSettings(
+            host="127.0.0.5",
+            port=8081,
+            path="/accelo",
+            stateless=True,
+            json_response=True,
+        )
+
+        await run_streamable_http(settings)
+
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs["host"] == "127.0.0.5"
+        assert kwargs["port"] == 8081
+        assert kwargs["streamable_http_path"] == "/accelo"
+        assert kwargs["json_response"] is True
+        assert kwargs["stateless_http"] is True
+        ts = settings.transport_security()
+        assert kwargs["transport_security"].allowed_hosts == ts.allowed_hosts
+        assert (
+            kwargs["transport_security"].enable_dns_rebinding_protection
+            is ts.enable_dns_rebinding_protection
+        )
+
+    async def test_sse_passes_security_only(self, monkeypatch):
+        mock_run = AsyncMock()
+        monkeypatch.setattr(server_module.MCPServer, "run_sse_async", mock_run)
+        monkeypatch.setattr(
+            server_module,
+            "create_server",
+            lambda: (server_module.MCPServer("t"), _DummyClient()),
+        )
+        settings = HttpTransportSettings(host="127.0.0.1", port=3000, path="/accelo")
+
+        await run_sse(settings)
+
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs["host"] == "127.0.0.1"
+        assert kwargs["port"] == 3000
+        assert "transport_security" in kwargs
+        assert "streamable_http_path" not in kwargs
+        assert "json_response" not in kwargs
+        assert "stateless_http" not in kwargs

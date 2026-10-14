@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import html
 import json
 import logging
 import os
@@ -119,8 +120,11 @@ class AuthManager:
                     self.send_response(400)
                     self.send_header("Content-Type", "text/html")
                     self.end_headers()
+                    # Escape the provider-supplied error so a malicious
+                    # error/error_description cannot inject markup (CWE-79).
+                    safe_error = html.escape(result["error"] or "")
                     self.wfile.write(
-                        f"<html><body><h1>Error: {result['error']}</h1></body></html>".encode()
+                        f"<html><body><h1>Error: {safe_error}</h1></body></html>".encode()
                     )
                 else:
                     self.send_response(404)
@@ -305,6 +309,18 @@ class AuthManager:
         """Installed app flow: admin visits approval URL, gets PIN, user enters it."""
         import sys
 
+        # Guard FIRST, before any side effects: the PIN prompt needs an interactive
+        # terminal, so bail out on non-TTY stdin before the authorize POST, the
+        # browser open, or any printing — otherwise we would open a browser and
+        # emit PIN instructions for a prompt we can never read (issue #14).
+        if not sys.stdin.isatty():
+            raise AuthError(
+                "Installed-application login needs an interactive terminal to read the "
+                "approval PIN, but stdin is not a TTY (it is the MCP protocol stream on the "
+                "stdio transport). Complete the login in a terminal, or use a 'service' "
+                "auth type for unattended operation."
+            )
+
         # Request authorization — Accelo returns a 302 redirect to the approval page
         response = await self._http.post(
             self._authorize_url,
@@ -349,14 +365,6 @@ class AuthManager:
                 "A PIN has been sent to an admin of your Accelo deployment.\n"
                 "Enter the PIN below to complete authorization:\n",
                 file=sys.stderr,
-            )
-
-        if not sys.stdin.isatty():
-            raise AuthError(
-                "Installed-application login needs an interactive terminal to read the "
-                "approval PIN, but stdin is not a TTY (it is the MCP protocol stream on the "
-                "stdio transport). Complete the login in a terminal, or use a 'service' "
-                "auth type for unattended operation."
             )
 
         pin = input("PIN: ").strip()

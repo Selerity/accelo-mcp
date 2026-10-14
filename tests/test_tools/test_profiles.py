@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -88,10 +89,9 @@ class TestSetProfileValue:
         await client.close()
 
         assert post_route.called
-        request_body = post_route.calls[0].request.content.decode()
-        assert "value=" in request_body
-        assert "example.com" in request_body
-        assert "profile.80" not in request_body
+        body = parse_qs(post_route.calls[0].request.content.decode())
+        assert body["value"] == ["https://example.com/doc"]
+        assert "profile.80" not in body
         assert result.get("error") is not True
 
     @respx.mock

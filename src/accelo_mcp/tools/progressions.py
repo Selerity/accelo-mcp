@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
-from ..client import AcceloClient
+from ..client import AcceloClient, build_params
 
 
 def register(server: MCPServer, client: AcceloClient):
@@ -14,6 +14,8 @@ def register(server: MCPServer, client: AcceloClient):
     async def accelo_list_progressions(
         object_type: str,
         object_id: int,
+        page: int = 0,
+        limit: int = 10,
     ) -> dict:
         """List available progressions for an object (possible status transitions).
 
@@ -21,8 +23,11 @@ def register(server: MCPServer, client: AcceloClient):
             object_type: The object type — tasks, companies, jobs, prospects,
                 issues, milestones, affiliations, contracts, contacts, expenses
             object_id: The object's ID
+            page: Page number (0-indexed)
+            limit: Results per page (max 100)
         """
-        return await client.get(f"/{object_type}/{object_id}/progressions")
+        params = build_params(page=page, limit=limit)
+        return await client.get(f"/{object_type}/{object_id}/progressions", params=params)
 
     @server.tool()
     async def accelo_run_progression(

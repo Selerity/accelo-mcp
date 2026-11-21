@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
-from ..client import AcceloAPIError, AcceloClient
+from ..client import AcceloAPIError, AcceloClient, build_params
 from ..models import format_error
 
 
@@ -43,6 +43,8 @@ def register(server: MCPServer, client: AcceloClient):
     async def accelo_list_profile_fields(
         object_type: str,
         fields: str | None = None,
+        page: int = 0,
+        limit: int = 10,
     ) -> dict:
         """List profile fields available for an object type.
 
@@ -50,10 +52,10 @@ def register(server: MCPServer, client: AcceloClient):
             object_type: The object type — affiliations, companies, contacts, contracts,
                 invoices, issues, jobs, milestones, prospects, staff
             fields: Additional fields to return
+            page: Page number (0-indexed)
+            limit: Results per page (max 100)
         """
-        params = {}
-        if fields:
-            params["_fields"] = fields
+        params = build_params(fields=fields, page=page, limit=limit)
         return await client.get(f"/{object_type}/profiles/fields", params=params)
 
     @server.tool()
@@ -61,6 +63,8 @@ def register(server: MCPServer, client: AcceloClient):
         object_type: str,
         object_id: int,
         fields: str | None = None,
+        page: int = 0,
+        limit: int = 10,
     ) -> dict:
         """Get profile field values for a specific object.
 
@@ -68,10 +72,10 @@ def register(server: MCPServer, client: AcceloClient):
             object_type: The object type (e.g. "companies", "issues")
             object_id: The object's ID
             fields: Additional fields to return
+            page: Page number (0-indexed)
+            limit: Results per page (max 100)
         """
-        params = {}
-        if fields:
-            params["_fields"] = fields
+        params = build_params(fields=fields, page=page, limit=limit)
         return await client.get(f"/{object_type}/{object_id}/profiles/values", params=params)
 
     @server.tool()

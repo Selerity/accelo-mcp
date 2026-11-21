@@ -16,14 +16,19 @@ def register(server: MCPServer, client: AcceloClient):
     async def accelo_list_collections(
         object_type: str,
         object_id: int,
+        page: int = 0,
+        limit: int = 10,
     ) -> dict:
         """List resource collections for an object.
 
         Args:
             object_type: The object type (e.g. "companies", "issues", "jobs", "contacts")
             object_id: The object's ID
+            page: Page number (0-indexed)
+            limit: Results per page (max 100)
         """
-        return await client.get(f"/{object_type}/{object_id}/collections")
+        params = build_params(page=page, limit=limit)
+        return await client.get(f"/{object_type}/{object_id}/collections", params=params)
 
     @server.tool()
     async def accelo_list_resources(

@@ -95,6 +95,15 @@ class TestBuildParams:
         params = build_params(limit=500)
         assert params["_limit"] == 100
 
+    def test_offset_replaces_page(self):
+        params = build_params(page=3, limit=11, offset=30)
+        assert params == {"_limit": 11, "_offset": 30}
+
+    def test_offset_zero_is_still_sent(self):
+        params = build_params(offset=0)
+        assert params["_offset"] == 0
+        assert "_page" not in params
+
     def test_no_filters_key_when_none(self):
         params = build_params(filters=None)
         assert "_filters" not in params

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
-from ..client import AcceloAPIError, AcceloClient, build_params
+from ..client import AcceloAPIError, AcceloClient
 from ..models import format_error
 
 
@@ -54,9 +54,14 @@ def register(server: MCPServer, client: AcceloClient):
             fields: Additional fields to return
             page: Page number (0-indexed)
             limit: Results per page (max 100)
+
+        The result has a top-level has_more flag: true when another page exists.
+        With limit=100 it is true whenever the page is full, so the next page
+        may be empty.
         """
-        params = build_params(fields=fields, page=page, limit=limit)
-        return await client.get(f"/{object_type}/profiles/fields", params=params)
+        return await client.get_page(
+            f"/{object_type}/profiles/fields", fields=fields, page=page, limit=limit
+        )
 
     @server.tool()
     async def accelo_get_profile_values(
@@ -74,9 +79,14 @@ def register(server: MCPServer, client: AcceloClient):
             fields: Additional fields to return
             page: Page number (0-indexed)
             limit: Results per page (max 100)
+
+        The result has a top-level has_more flag: true when another page exists.
+        With limit=100 it is true whenever the page is full, so the next page
+        may be empty.
         """
-        params = build_params(fields=fields, page=page, limit=limit)
-        return await client.get(f"/{object_type}/{object_id}/profiles/values", params=params)
+        return await client.get_page(
+            f"/{object_type}/{object_id}/profiles/values", fields=fields, page=page, limit=limit
+        )
 
     @server.tool()
     async def accelo_set_profile_value(

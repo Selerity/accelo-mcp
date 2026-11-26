@@ -15,6 +15,10 @@ from .config import AcceloConfig
 logger = logging.getLogger(__name__)
 
 
+# Accelo rejects or clamps a page size above this value.
+MAX_PAGE_SIZE = 100
+
+
 class AcceloAPIError(Exception):
     """Raised when the Accelo API returns an error."""
 
@@ -60,6 +64,65 @@ class AcceloClient:
     async def get(self, path: str, params: dict[str, Any] | None = None) -> dict:
         """GET request to Accelo API."""
         return await self._request("GET", path, params=params)
+
+    async def get_page(
+        self,
+        path: str,
+        *,
+        filters: dict[str, Any] | None = None,
+        fields: str | None = None,
+        search: str | None = None,
+        page: int = 0,
+        limit: int = 10,
+    ) -> dict:
+        """GET one page of a list endpoint and report whether more rows exist.
+
+        Accelo returns no total, page count or next-page link, so the only way
+        to tell whether a page was cut short is to ask for one row more than
+        the caller wants. That extra row is removed from the result and only
+        sets a top-level ``has_more`` flag next to ``meta`` and ``response``.
+        No additional API call is made.
+
+        ``_page`` is a page index multiplied by ``_limit``, so asking for
+        ``limit + 1`` rows per page would shift every later page by one row.
+        When probing, the start row is therefore sent as ``_offset``
+        (``page * limit``) and ``_page`` is left out.
+
+        Accelo caps ``_limit`` at 100, so a request for a full 100-row page
+        cannot be probed with a 101st row. In that case ``_page``/``_limit``
+        are sent as usual and ``has_more`` is True whenever the page came back
+        full, which means "there may be more" (the next page can turn out to
+        be empty).
+
+        ``limit`` is clamped to 1..100 and ``page`` to 0 or above, so the flag
+        is always computed from a real page request.
+
+        The flag is only added when ``response`` is a flat list. Any other
+        shape is returned unchanged, but the request has already gone out with
+        the extra row, so use this only on endpoints that return a flat list.
+        """
+        size = max(1, min(limit, MAX_PAGE_SIZE))
+        page = max(page, 0)
+        probe = size < MAX_PAGE_SIZE
+        params = build_params(
+            filters=filters,
+            fields=fields,
+            search=search,
+            page=page,
+            limit=size + 1 if probe else size,
+            offset=page * size if probe else None,
+        )
+        result = await self.get(path, params=params)
+
+        rows = result.get("response")
+        if not isinstance(rows, list):
+            return result
+        if probe:
+            has_more = len(rows) > size
+            rows = rows[:size]
+        else:
+            has_more = len(rows) >= size
+        return {**result, "response": rows, "has_more": has_more}
 
     async def post(
         self,
@@ -244,6 +307,7 @@ def build_params(
     search: str | None = None,
     page: int = 0,
     limit: int = 10,
+    offset: int | None = None,
 ) -> dict[str, Any]:
     """Build Accelo API query parameters from structured inputs.
 
@@ -253,11 +317,13 @@ def build_params(
         search: Free-text search term
         page: Page number (0-indexed)
         limit: Results per page (max 100)
+        offset: Start row. When set it is sent as _offset in place of _page.
     """
-    params: dict[str, Any] = {
-        "_page": page,
-        "_limit": min(limit, 100),
-    }
+    params: dict[str, Any] = {"_limit": min(limit, MAX_PAGE_SIZE)}
+    if offset is None:
+        params["_page"] = page
+    else:
+        params["_offset"] = offset
 
     filter_str = build_filters(filters)
     if filter_str:

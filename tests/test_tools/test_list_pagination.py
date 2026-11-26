@@ -46,11 +46,6 @@ LIST_TOOLS = [
         {"object_type": "tasks", "object_id": 24},
         "/tasks/24/progressions",
     ),
-    (
-        "accelo_list_collections",
-        {"object_type": "issues", "object_id": 9},
-        "/issues/9/collections",
-    ),
 ]
 IDS = [t[0] for t in LIST_TOOLS]
 
@@ -86,8 +81,11 @@ class TestListToolPagination:
         await client.close()
 
         query = _query(route)
-        assert query["_page"] == ["3"]
-        assert query["_limit"] == ["25"]
+        # One extra row is requested so the tool can report has_more; the
+        # start row is sent as _offset (page * limit) so later pages don't shift.
+        assert query["_offset"] == ["75"]
+        assert query["_limit"] == ["26"]
+        assert "_page" not in query
 
     @respx.mock
     @pytest.mark.asyncio
@@ -99,8 +97,8 @@ class TestListToolPagination:
         await client.close()
 
         query = _query(route)
-        assert query["_page"] == ["0"]
-        assert query["_limit"] == ["10"]
+        assert query["_offset"] == ["0"]
+        assert query["_limit"] == ["11"]
 
     @respx.mock
     @pytest.mark.asyncio
@@ -111,7 +109,30 @@ class TestListToolPagination:
         await server.call_tool(tool, {**args, "limit": 500})
         await client.close()
 
-        assert _query(route)["_limit"] == ["100"]
+        query = _query(route)
+        assert query["_limit"] == ["100"]
+        assert query["_page"] == ["0"]
+
+
+class TestCollectionsPagination:
+    """Collections keeps plain _page/_limit paging and reports no has_more."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_page_and_limit_are_forwarded_unchanged(self, server_and_client):
+        server, client = server_and_client
+        route = _ok_route("/issues/9/collections")
+
+        await server.call_tool(
+            "accelo_list_collections",
+            {"object_type": "issues", "object_id": 9, "page": 3, "limit": 25},
+        )
+        await client.close()
+
+        query = _query(route)
+        assert query["_page"] == ["3"]
+        assert query["_limit"] == ["25"]
+        assert "_offset" not in query
 
 
 class TestFieldsStillForwarded:
@@ -129,7 +150,7 @@ class TestFieldsStillForwarded:
 
         query = _query(route)
         assert query["_fields"] == ["name,field_type"]
-        assert query["_page"] == ["1"]
+        assert query["_offset"] == ["10"]
 
 
 class TestSecondPageIsReachable:
@@ -140,8 +161,9 @@ class TestSecondPageIsReachable:
         server, client = server_and_client
 
         def respond(request: httpx.Request) -> httpx.Response:
-            page = int(parse_qs(request.url.query.decode())["_page"][0])
-            rows = [{"id": str(page * 10 + n)} for n in range(10 if page == 0 else 1)]
+            query = parse_qs(request.url.query.decode())
+            start = int(query["_offset"][0])
+            rows = [{"id": str(n)} for n in range(11)][start : start + int(query["_limit"][0])]
             return httpx.Response(200, json={"meta": {"status": "ok"}, "response": rows})
 
         respx.get(f"{BASE}/prospects/extensions/fields").mock(side_effect=respond)
